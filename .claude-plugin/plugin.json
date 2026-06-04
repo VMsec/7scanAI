@@ -1,0 +1,11 @@
+{
+  "name": "7scanAI",
+  "description": "自动化安全侦察与漏洞扫描 pipeline skill — 子域名发现 → DNS解析 → 端口扫描 → Web指纹 → 漏洞扫描 → 结果聚合。集成 OneForAll/ksubdomain/subfinder/nuclei/afrog/httpx/naabu 等 20+ 工具链。",
+  "version": "1.0.0",
+  "author": {
+    "name": "7scanAI"
+  },
+  "license": "MIT",
+  "category": "security",
+  "tags": ["security", "reconnaissance", "vulnerability-scanning", "bug-bounty", "automation", "subdomain", "port-scan", "fingerprint"]
+}
