@@ -394,6 +394,9 @@ git clone https://github.com/<your-username>/7scanAI.git /opt/code/7scanAI
 扫 baidu.com，端口扫全端口，需要截图
 扫 qq.com，快速扫一下（top-100 端口，不截图，不开域名变形）
 扫 target.com，有泛解析别开域名变形，端口 top-1000 不截图
+
+# 我常用的设定目标模式
+/goal 扫描vulnweb.com达到出完整报告的程度，运行中遇到的任何问题尝试解决，进程长时间挂住无反应主动kill，我需要扫top100端口,不做子域名变形，截图关闭
 ```
 
 ### 多域名（逐个独立扫描）
