@@ -36,8 +36,8 @@
   ├─ Phase 5  Web            httpx 指纹 → 智能分类(高价值/泄露风险)
   │                          → gowitness 截图(可选)
   │
-  ├─ Phase 6  Vuln           6 引擎并行扫描:
-  │                          kscan → afrog(分批) → 备份扫描
+  ├─ Phase 6  Vuln           6 引擎串行扫描:
+  │                          kscan指纹/弱口令 → afrog(分批) → 备份扫描
   │                          → dirsearch → nuclei → katana+fuzz
   │
   └─ Phase 7  Report         统计汇总 → AI 逐条研判
