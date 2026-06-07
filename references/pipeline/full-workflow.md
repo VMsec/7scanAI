@@ -149,6 +149,7 @@ if [ -z "$SCRIPT_DIR" ] || [ ! -f "$SCRIPT_DIR/references/scripts/auto_install.s
   exit 1
 fi
 echo "📍 7scanAI 安装路径: $SCRIPT_DIR"
+WORK_ROOT="$(pwd)"
 
 # ── 环境预检 (MUST — 不可跳过) ──
 # Phase 2-6 依赖大量 CLI 工具，缺任何一个都会导致扫描中断。
@@ -168,7 +169,7 @@ echo "📍 7scanAI 安装路径: $SCRIPT_DIR"
 PORT_RANGE=2          # 1=top-100, 2=top-1000, 3=全端口
 PERMUTATION="n"       # "y" 或 "n" — 是否启用 dnsgen + alterx 域名变形
 SCREENSHOT="n"        # "y" 或 "n"
-TARGET_DIR="$SCRIPT_DIR/targets/$DOMAIN"
+TARGET_DIR="$WORK_ROOT/targets/$DOMAIN"
 
 mkdir -p targets
 mkdir -p "targets/$DOMAIN"/{whois_info,oneforall_subdomains,ksubdomain_subdomains,subdomainsbrute_subdomains,subfinder_subdomains,gau_subdomains,jsubfinder_subdomains,dnsgen_subdomains,alterx_subdomains,collect_subdomains,active_subdomains,active_ips,active_all,active_ports,active_webs,web_screenshots/screenshots,afrog_scan_results,dirsearch_result,nuclei_fuzzing_result,brute_result,backup_result,runtime}
@@ -214,7 +215,7 @@ run_with_watchdog() {
   shift 5
   [ "$1" = "--" ] && shift
 
-  mkdir -p "targets/$DOMAIN/runtime"
+  mkdir -p "$TARGET_DIR/runtime"
   : > "$err_file"
   [ -n "$progress_file" ] && : > "$progress_file"
 
@@ -222,7 +223,7 @@ run_with_watchdog() {
     timeout --kill-after=30 "$total_timeout" "$@" 2>>"$err_file"
   ) &
   local scan_pid=$!
-  echo "$scan_pid" > "targets/$DOMAIN/runtime/${tool_name}.pid"
+  echo "$scan_pid" > "$TARGET_DIR/runtime/${tool_name}.pid"
 
   local last_progress_ts
   local last_bytes
@@ -249,7 +250,7 @@ run_with_watchdog() {
 
   wait "$scan_pid"
   local scan_rc=$?
-  echo "$scan_rc" > "targets/$DOMAIN/runtime/${tool_name}.exitcode"
+  echo "$scan_rc" > "$TARGET_DIR/runtime/${tool_name}.exitcode"
   finalize_err_log "$err_file" "$scan_rc"
   return "$scan_rc"
 }
@@ -309,7 +310,7 @@ pushd "$SCRIPT_DIR" >/dev/null || { echo "❌ 无法进入 $SCRIPT_DIR"; exit 1;
 if [ ! -f "$SCRIPT_DIR/ksubdomain.yaml" ]; then
   run_with_watchdog "ksubdomain_test" 300 120 \
     "$SCRIPT_DIR/ksubdomain.yaml" \
-    "targets/$DOMAIN/ksubdomain_subdomains/ksubdomain_test.err.log" -- \
+    "$TARGET_DIR/ksubdomain_subdomains/ksubdomain_test.err.log" -- \
     ksubdomain test
   # 动态获取本机 IP 写入配置（必须校验 IP 格式）
   IP=$(curl -s --fail --connect-timeout 10 --max-time 15 https://api.ipify.org 2>/dev/null || true)
@@ -907,12 +908,12 @@ set -o pipefail
 if [ ! -s "targets/$DOMAIN"/active_webs/active_webs.txt ]; then
   echo "⏭️ dirsearch: active_webs.txt 为空，跳过"
 else
-  pushd "targets/$DOMAIN" >/dev/null || { echo "❌ 无法进入 targets/$DOMAIN，跳过 dirsearch"; exit 1; }
+  pushd "$TARGET_DIR" >/dev/null || { echo "❌ 无法进入 $TARGET_DIR，跳过 dirsearch"; exit 1; }
   if [ -f "active_webs/active_webs.txt" ]; then
     : > "dirsearch_result/dirsearch_progress.log"
     run_with_watchdog "dirsearch" 7200 900 \
-      "targets/$DOMAIN/dirsearch_result/dirsearch_progress.log" \
-      "targets/$DOMAIN/dirsearch_result/dirsearch.err.log" -- \
+      "$TARGET_DIR/dirsearch_result/dirsearch_progress.log" \
+      "$TARGET_DIR/dirsearch_result/dirsearch.err.log" -- \
       sh -c 'python3 "$1" active_webs/active_webs.txt && find dirsearch_result -maxdepth 1 -type f -name "smart_scan_*.txt" -exec cat {} + > dirsearch_result/dirsearch_progress.log' _ "$SCRIPT_DIR/references/scripts/auto_dirsearch.py"
   else
     echo "❌ dirsearch 输入文件缺失: active_webs/active_webs.txt"

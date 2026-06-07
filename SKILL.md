@@ -105,7 +105,8 @@ Profile 规则：
 
 目标工作目录必须满足：
 
-- 先定义 `TARGET_DIR="$SCRIPT_DIR/targets/$DOMAIN"`
+- 先在任何 `pushd "$SCRIPT_DIR"` 之前保存 `WORK_ROOT="$(pwd)"`
+- 再定义 `TARGET_DIR="$WORK_ROOT/targets/$DOMAIN"`
 - 只要某个步骤会切换工作目录，后续文件读写就必须改用 `"$TARGET_DIR"/...` 绝对路径
 
 环境预检必须执行：
