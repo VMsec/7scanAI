@@ -1,5 +1,12 @@
 # 工具安装
 
+## 客户端兼容性
+
+- `Claude Code` 插件模式读取 `.claude-plugin/plugin.json`
+- `Claude Code` 项目模式读取 `.claude/skills/7scanai/SKILL.md`
+- `Codex` 插件模式读取 `.codex-plugin/plugin.json` 和 `skills/7scanai/SKILL.md`
+- 两端共用同一份扫描流程定义，不需要维护两套脚本
+
 ## 一键安装
 
 ```bash
@@ -20,7 +27,7 @@ bash references/scripts/auto_install.sh check
 | dirsearch | `/opt/dirsearch` | `git clone https://github.com/maurosoria/dirsearch.git /opt/dirsearch && pip3 install -r /opt/dirsearch/requirements.txt --break-system-packages` |
 | ihoneyBakFileScan_Modify | `/opt/ihoneyBakFileScan_Modify` | `git clone https://github.com/VMsec/ihoneyBakFileScan_Modify.git /opt/ihoneyBakFileScan_Modify && pip3 install -r /opt/ihoneyBakFileScan_Modify/requirements.txt --break-system-packages` |
 
-> ⚠️ **Python 工具安装硬规则**: 每个 Python 工具 git clone 后**必须**立即执行 `pip3 install -r requirements.txt --break-system-packages`，不可跳过。`--break-system-packages` 强制安装，避免 PEP 668 环境报错。
+> ⚠️ **Python 工具安装硬规则**: 所有 Python 依赖必须系统级安装，统一使用 `pip3 install --break-system-packages`。每个 Python 工具 git clone 后**必须**立即执行 `pip3 install -r requirements.txt --break-system-packages`，不可跳过。
 
 ### Go 工具
 ```bash
@@ -56,7 +63,7 @@ cd /opt/csvquote && go build -o csvquote cmd/csvquote/main.go && cp csvquote /us
 ```bash
 apt install -y nmap masscan wfuzz libpcap-dev
 pip3 install dnsgen --break-system-packages
-pipx install uro
+pip3 install uro --break-system-packages
 ```
 
 ### Nuclei 模板

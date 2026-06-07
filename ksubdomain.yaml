@@ -1,0 +1,4 @@
+src_ip: 192.168.2.124
+device: ens33
+src_mac: 00:0c:29:4d:83:f2
+dst_mac: 90:fb:5d:fc:f4:30

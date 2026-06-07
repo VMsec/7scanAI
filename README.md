@@ -195,7 +195,7 @@
 ```bash
 # 单域名
 python3 references/scripts/generate_report.py -d "targets/<domain>"
-# → 生成 targets/<domain>/7scanAI_report.html
+# → 生成 targets/<domain>/<domain>_7scanAI_report.html
 
 # 多域名汇总
 python3 references/scripts/generate_report.py -r targets/
@@ -361,13 +361,21 @@ bash references/scripts/auto_install.sh check
 
 ## 安装
 
-### 通过 Claude Code 插件安装（推荐）
+### 通过 Claude Code 安装
 
-```
+```bash
 /plugin install github.com/<your-username>/7scanAI
 ```
 
-安装后即可在任意项目中通过 `/7scanAI <domain>` 调用。
+安装后，`Claude Code` 会按官方插件规则读取 `.claude-plugin/plugin.json`。
+
+如果你是把这个仓库直接作为当前项目使用，而不是安装插件，则 `Claude Code` 会按官方项目规则读取 `.claude/skills/7scanai/SKILL.md`。
+
+### 通过 Codex 安装
+
+将仓库作为本地插件目录接入，`Codex` 会按插件规则读取 [`.codex-plugin/plugin.json`](/opt/code/7scanAI/7scanAI/.codex-plugin/plugin.json:1) 和 [`skills/7scanai/SKILL.md`](/opt/code/7scanAI/7scanAI/skills/7scanai/SKILL.md:1)。
+
+如果你的 `Codex` 使用个人插件市场目录，保持该仓库结构不变并把它放到对应插件路径下即可。
 
 ### 手动安装
 
@@ -381,7 +389,11 @@ git clone https://github.com/<your-username>/7scanAI.git /opt/code/7scanAI
 
 ### 命令行调用
 ```
-/7scanAI baidu.com
+# Claude Code / Codex 插件模式
+/7scanai:7scanai baidu.com
+
+# Claude Code 项目模式（当前仓库）
+/7scanai baidu.com
 ```
 
 ### 自然语言（AI 自动触发）
@@ -420,14 +432,24 @@ git clone https://github.com/<your-username>/7scanAI.git /opt/code/7scanAI
 
 ```
 7scanAI/
-├── SKILL.md                       # AI 工作流定义（核心文件）
+├── SKILL.md                       # 轻量主控 skill（触发条件、规则、phase 编排）
 ├── README.md                      # 本文件
+├── .codex-plugin/
+│   └── plugin.json                # Codex 插件描述
 ├── .claude-plugin/
 │   └── plugin.json                # Claude Code 插件描述
+├── .claude/
+│   └── skills/
+│       └── 7scanai/
+│           └── SKILL.md           # Claude Code 项目级 skill 入口
+├── skills/
+│   └── 7scanai/
+│       └── SKILL.md               # Codex 兼容层，指向根目录权威流程
 └── references/
     ├── install.md                 # 详细安装指南
     ├── config.md                  # 配置说明
     ├── pipeline/
+    │   ├── full-workflow.md       # 命令级原始长版流程
     │   ├── 02-subdomain-tools.md  # 子域名工具参数说明
     │   ├── 04-port-strategy.md    # 端口扫描策略
     │   └── 06-vuln-engines.md     # 漏洞引擎参数说明

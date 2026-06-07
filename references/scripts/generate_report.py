@@ -7,7 +7,7 @@
   python3 generate_report.py -d example.com -s screenshots/    # 带截图
   python3 generate_report.py -r 7scan_results/                 # 多域名汇总
 
-输出: example.com/7scanAI_report.html (单域名) 或 7scan_results/report.html (多域名)
+输出: example.com/example.com_7scanAI_report.html (单域名) 或 7scan_results/7scanAI_report.html (多域名)
    直接用浏览器打开即可，无需服务器。
 """
 
@@ -182,11 +182,15 @@ def load_vulns(domain_dir):
                 data = json.load(open(f, errors='replace'))
                 if isinstance(data, list):
                     for item in data:
+                        pocinfo = item.get('pocinfo', {})
+                        severity = pocinfo.get('infoseg', 'unknown')
+                        target = item.get('fulltarget') or item.get('target') or item.get('url') or '-'
+                        name = pocinfo.get('infoname') or pocinfo.get('id') or 'afrog-detection'
                         vulns.append({
                             'source': 'afrog',
-                            'detail': item.get('info', {}).get('name', str(item))[:300],
-                            'severity': item.get('info', {}).get('severity', 'unknown'),
-                            'url': item.get('host', '-'),
+                            'detail': f'{name} -> {target}'[:300],
+                            'severity': severity,
+                            'url': target,
                         })
             except:
                 pass
@@ -507,7 +511,8 @@ def main():
 
     if args.domain:
         domain_dir = args.domain.rstrip('/')
-        output = args.output or os.path.join(domain_dir, '7scanAI_report.html')
+        domain_name = os.path.basename(domain_dir)
+        output = args.output or os.path.join(domain_dir, f'{domain_name}_7scanAI_report.html')
         generate_html([domain_dir], output)
     elif args.results_dir:
         root = args.results_dir.rstrip('/')

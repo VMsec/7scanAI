@@ -60,7 +60,7 @@ logging.basicConfig(
 )
 
 # ── 配置常量 ───────────────────────────────────────────────
-DEFAULT_EXCLUDED_STATUS = '500,502,400,404,405,410,429,503,504'
+DEFAULT_EXCLUDED_STATUS = '500,502,400,404,410,429,503,504'
 DEFAULT_EXCLUDED_SUBDIRS = (
     'js,css,fonts,images,image,img,pictures,pic,icons,icon,svg,webp,gallery,'
     'video,videos,audio,cdn,assets,static,media,dist,build,bin,node_modules,'
@@ -72,6 +72,19 @@ DEFAULT_EXCLUDE_TEXTS = (
     "Not Found,Page Not Found,Forbidden,Access Denied,blocked,"
     "Cloudflare,F5,Akamai,Sorry,captcha,has been blocked,Error 404"
 )
+
+SENSITIVE_PATHS = [
+    "db.sql",
+    "index.bak",
+    "wp-config.bak",
+    ".env",
+    ".git/config",
+    ".svn/entries",
+    "phpinfo.php",
+    "database.sql",
+    "dump.sql",
+    "backup.zip",
+]
 
 # ── 内存监控 ───────────────────────────────────────────────
 def check_memory(min_free_mb=150):
@@ -147,6 +160,38 @@ def run_dirsearch_safe(cmd, timeout, hard_timeout):
     except Exception as e:
         return False, str(e)
 
+def probe_sensitive_paths(url, output_file):
+    """补扫少量高价值敏感文件，弥补字典/过滤策略漏报"""
+    found = []
+    for path in SENSITIVE_PATHS:
+        target = f"{url.rstrip('/')}/{path}"
+        try:
+            cmd = [
+                'curl', '-s', '-k', '-L', '--max-time', '8', '--retry', '0',
+                '-o', '/tmp/dirsearch_sensitive_body.tmp',
+                '-w', '%{http_code} %{size_download}',
+                '-A', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                target
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                continue
+            parts = result.stdout.strip().split()
+            if len(parts) != 2:
+                continue
+            status_code, size_download = parts
+            if status_code == '200' and size_download.isdigit() and int(size_download) > 0:
+                found.append(f"{status_code} - {size_download:>5}B - {target}")
+        except Exception:
+            continue
+
+    if found:
+        with open(output_file, 'a', encoding='utf-8', errors='replace') as f:
+            for line in sorted(set(found)):
+                f.write(line + '\n')
+        return len(found)
+    return 0
+
 def process_url(url, output_dir, temp_dir, timeout, force, use_ffuf=False, threads=5):
     """处理单个 URL"""
     ref_file = None
@@ -195,7 +240,7 @@ def process_url(url, output_dir, temp_dir, timeout, force, use_ffuf=False, threa
                 '--exclude-texts', DEFAULT_EXCLUDE_TEXTS,
                 '--no-color',
                 '-o', output_file,
-                '--format', 'simple'
+                '-O', 'simple'
             ]
             if ref_file:
                 cmd += ['--exclude-response', ref_file]
@@ -203,6 +248,33 @@ def process_url(url, output_dir, temp_dir, timeout, force, use_ffuf=False, threa
                 cmd += ['-w', WORDLIST]
 
         success, _ = run_dirsearch_safe(cmd, timeout, HARD_KILL_TIMEOUT)
+
+        # 如果智能过滤模式没有产物，回退到不带 exclude-response 的标准模式，
+        # 避免参考页策略与目标响应过于相似时把真实结果全部过滤掉。
+        if (not success or not os.path.exists(output_file) or os.path.getsize(output_file) == 0) and not use_ffuf:
+            fallback_cmd = [
+                'python3', '/opt/dirsearch/dirsearch.py',
+                '-u', url,
+                '-x', DEFAULT_EXCLUDED_STATUS,
+                '--random-agent',
+                '-t', str(max(3, threads)),
+                '--retries', '1',
+                '--full-url',
+                '--follow-redirects',
+                '--exclude-subdirs', DEFAULT_EXCLUDED_SUBDIRS,
+                '--exclude-texts', DEFAULT_EXCLUDE_TEXTS,
+                '--no-color',
+                '-o', output_file,
+                '-O', 'simple'
+            ]
+            if WORDLIST:
+                fallback_cmd += ['-w', WORDLIST]
+            logging.info(f'    ↩️ {url} 智能过滤无结果，回退标准模式')
+            success, _ = run_dirsearch_safe(fallback_cmd, timeout, HARD_KILL_TIMEOUT)
+
+        sensitive_hits = probe_sensitive_paths(url, output_file)
+        if sensitive_hits:
+            logging.info(f'    🎯 {url} 敏感文件补扫命中 {sensitive_hits} 条')
 
         # 检查产出
         if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
