@@ -80,8 +80,9 @@ description: 自动化安全侦察与漏洞扫描 pipeline。用户给根域名�
    - 端口范围：`top-100` / `top-1000` / `1-65535`
    - 是否启用 `dnsgen` / `alterx`
    - 是否启用 `gowitness`
-3. 定位 7scanAI 根目录并跑环境预检。
-4. 创建 `targets/<domain>/` 目录树。
+3. 定位 7scanAI 根目录并确定目标绝对工作目录。
+4. 跑环境预检。
+5. 创建 `targets/<domain>/` 目录树。
 
 默认值：
 
@@ -101,6 +102,11 @@ Profile 规则：
 - 优先从当前目录向上找同时包含 `SKILL.md` 和 `references/scripts/auto_install.sh` 的目录
 - 找不到时，再全盘搜索 `*/references/scripts/auto_install.sh`
 - 只要 `SCRIPT_DIR` 不含 `references/scripts/auto_install.sh`，立即中止
+
+目标工作目录必须满足：
+
+- 先定义 `TARGET_DIR="$SCRIPT_DIR/targets/$DOMAIN"`
+- 只要某个步骤会切换工作目录，后续文件读写就必须改用 `"$TARGET_DIR"/...` 绝对路径
 
 环境预检必须执行：
 

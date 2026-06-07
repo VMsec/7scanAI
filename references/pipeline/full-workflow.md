@@ -168,6 +168,7 @@ echo "📍 7scanAI 安装路径: $SCRIPT_DIR"
 PORT_RANGE=2          # 1=top-100, 2=top-1000, 3=全端口
 PERMUTATION="n"       # "y" 或 "n" — 是否启用 dnsgen + alterx 域名变形
 SCREENSHOT="n"        # "y" 或 "n"
+TARGET_DIR="$SCRIPT_DIR/targets/$DOMAIN"
 
 mkdir -p targets
 mkdir -p "targets/$DOMAIN"/{whois_info,oneforall_subdomains,ksubdomain_subdomains,subdomainsbrute_subdomains,subfinder_subdomains,gau_subdomains,jsubfinder_subdomains,dnsgen_subdomains,alterx_subdomains,collect_subdomains,active_subdomains,active_ips,active_all,active_ports,active_webs,web_screenshots/screenshots,afrog_scan_results,dirsearch_result,nuclei_fuzzing_result,brute_result,backup_result,runtime}
@@ -320,21 +321,21 @@ if [ ! -f "$SCRIPT_DIR/ksubdomain.yaml" ]; then
 else
   echo "ℹ️ 复用现有 ksubdomain.yaml，不重复生成/改写"
 fi
-BEFORE=$(safe_line_count "targets/$DOMAIN/ksubdomain_subdomains/ksubdomain.txt")
+BEFORE=$(safe_line_count "$TARGET_DIR/ksubdomain_subdomains/ksubdomain.txt")
 # ksubdomain 输出含 "域名=>CNAME ...=>IP" 链，用 sed 去掉 => 及之后内容，仅保留纯域名
-: > "targets/$DOMAIN"/ksubdomain_subdomains/ksubdomain_raw.txt
+: > "$TARGET_DIR"/ksubdomain_subdomains/ksubdomain_raw.txt
 run_with_watchdog "ksubdomain_enum" 1200 300 \
-  "targets/$DOMAIN/ksubdomain_subdomains/ksubdomain_raw.txt" \
-  "targets/$DOMAIN/ksubdomain_subdomains/ksubdomain.err.log" -- \
-  sh -c 'ksubdomain e -d "$1" --wild-filter-mode advanced --silent > "$2"' _ "$DOMAIN" "targets/$DOMAIN/ksubdomain_subdomains/ksubdomain_raw.txt"
-cat "targets/$DOMAIN"/ksubdomain_subdomains/ksubdomain_raw.txt | tr -d '\r' | sed 's/=>.*//' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d' | sort | uniq | anew "targets/$DOMAIN"/ksubdomain_subdomains/ksubdomain.txt
-AFTER=$(safe_line_count "targets/$DOMAIN/ksubdomain_subdomains/ksubdomain.txt")
+  "$TARGET_DIR/ksubdomain_subdomains/ksubdomain_raw.txt" \
+  "$TARGET_DIR/ksubdomain_subdomains/ksubdomain.err.log" -- \
+  sh -c 'ksubdomain e -d "$1" --wild-filter-mode advanced --silent > "$2"' _ "$DOMAIN" "$TARGET_DIR/ksubdomain_subdomains/ksubdomain_raw.txt"
+cat "$TARGET_DIR"/ksubdomain_subdomains/ksubdomain_raw.txt | tr -d '\r' | sed 's/=>.*//' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d' | sort | uniq | anew "$TARGET_DIR"/ksubdomain_subdomains/ksubdomain.txt
+AFTER=$(safe_line_count "$TARGET_DIR/ksubdomain_subdomains/ksubdomain.txt")
 NEW=$((AFTER - BEFORE))
 echo "ksubdomain: $AFTER 条 (本次新增 $NEW)"
 
 if [ "$NEW" -gt 20000 ]; then
   echo "⚠️ 增量过大 ($NEW > 20000)，清空"
-  truncate -s 0 "targets/$DOMAIN"/ksubdomain_subdomains/ksubdomain.txt
+  truncate -s 0 "$TARGET_DIR/ksubdomain_subdomains/ksubdomain.txt"
 fi
 popd >/dev/null
 ```
