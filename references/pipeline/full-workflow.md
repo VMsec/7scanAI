@@ -152,13 +152,14 @@ echo "📍 7scanAI 安装路径: $SCRIPT_DIR"
 
 # ── 环境预检 (MUST — 不可跳过) ──
 # Phase 2-6 依赖大量 CLI 工具，缺任何一个都会导致扫描中断。
-# AI 必须先跑 auto_install.sh 检测 + 自动安装缺失项，确认全部就绪再继续。
+# AI 必须先跑 auto_install.sh check 检测依赖。
+# 如果检测失败，优先提示用户手动运行 auto_install.sh，避免在主流程中边装边扫。
 	echo ""
 	echo "🔧 检查依赖环境..."
-	if ! bash "$SCRIPT_DIR"/references/scripts/auto_install.sh; then
+	if ! bash "$SCRIPT_DIR"/references/scripts/auto_install.sh check; then
 	    echo ""
-	    echo "❌ 环境检查失败，无法继续扫描"
-	    echo "   请执行 'source /root/.bashrc' 后重新运行"
+	    echo "❌ 环境检查失败，优先请用户手动运行依赖安装脚本"
+	    echo "   bash \"$SCRIPT_DIR\"/references/scripts/auto_install.sh"
 	    exit 1
 	fi
 	echo ""

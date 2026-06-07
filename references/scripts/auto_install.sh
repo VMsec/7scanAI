@@ -8,6 +8,12 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 echo "📍 7scanAI 项目路径: $SCRIPT_DIR"
 
+# 预清理：删除会干扰 Go 版 httpx 判断的 Python 包装器
+if [ -f /usr/local/bin/httpx ] && grep -q "from httpx import main" /usr/local/bin/httpx 2>/dev/null; then
+    echo "🧹 检测到 Python 版 /usr/local/bin/httpx，已删除，优先使用 Go 版 httpx"
+    rm -f /usr/local/bin/httpx
+fi
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 MISSING=()
 INSTALL_ONLY="${1:-install}"

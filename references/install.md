@@ -10,11 +10,11 @@
 ## 一键安装
 
 ```bash
-# 在项目根目录下执行（脚本会自动探测路径）
-bash references/scripts/auto_install.sh
-
-# 仅检测不安装
+# 在项目根目录下先检测
 bash references/scripts/auto_install.sh check
+
+# 检测失败后，再手动安装
+bash references/scripts/auto_install.sh
 ```
 
 ## 依赖清单

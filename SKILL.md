@@ -108,8 +108,16 @@ Profile 规则：
 set -o pipefail
 
 SCRIPT_DIR="<按规则探测出的 7scanAI 根目录>"
+bash "$SCRIPT_DIR"/references/scripts/auto_install.sh check
+```
+
+如果 `check` 失败，优先提示用户手动运行：
+
+```bash
 bash "$SCRIPT_DIR"/references/scripts/auto_install.sh
 ```
+
+手动安装完成后，再继续扫描流程。默认不要在主流程里直接安装依赖。
 
 如需逐条执行初始化命令，读取 `references/pipeline/full-workflow.md` 的 Phase 1。
 

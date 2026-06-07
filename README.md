@@ -354,11 +354,11 @@ targets/<domain>/
 
 ### 一键安装 / 检测
 ```bash
-# 一键安装所有缺失工具
-bash references/scripts/auto_install.sh
-
 # 仅检测（列出缺失项）
 bash references/scripts/auto_install.sh check
+
+# 检测失败后，再手动安装所有缺失工具
+bash references/scripts/auto_install.sh
 ```
 
 ---
