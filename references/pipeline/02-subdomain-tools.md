@@ -1,41 +1,39 @@
-# Phase 2 — 子域名工具参数说明
+# Phase 2 速查表
+
+本文件不是第二套流程定义，只提供工具差异和参数注意点。  
+真正的命令执行顺序和输出路径，以 `references/pipeline/full-workflow.md` 为准。
 
 ## OneForAll
-- 路径: `/opt/OneForAll/oneforall.py`
-- 输出 CSV 第 6 列为子域名
-- `--req False` 禁用请求以加速
-- 耗时: 5-30min
+- 定位：综合型多源被动枚举，结果最杂但覆盖面大
+- 关键点：实际结果从 CSV 第 6 列提取，且必须排除末列为 `Brute` 的记录
+- 风险：部分数据源会 `429/403/502`，不能据此判定步骤失败
 
 ## ksubdomain
-- 需先 `ksubdomain test` 生成配置文件
-- 配置文件第一行为 `src_ip`，需设为本机出口 IP
-- `--wild-filter-mode advanced` 高级泛解析过滤模式
-- 结果 > 20000 行时清空
+- 定位：主动爆破，补齐已知弱字典命中的子域名
+- 关键点：使用 `--wild-filter-mode advanced --silent`
+- 规则：`ksubdomain.yaml` 已存在时直接复用，不再反复改写
+- 输出清洗：必须去掉 `=>` 后缀、CR、首尾空白和空行
 
 ## subDomainsBrute
-- `-t 200` 200 线程
-- `--full` 全量爆破
-- 结果取第一列（域名部分）
+- 定位：高线程主动字典爆破
+- 关键点：`-t 200 --full`
+- 特性：多进程/多线程运行，`ps` 里看到多个进程是正常现象
 
 ## subfinder
-- `-all` 使用所有 API 源
-- 纯被动，不发包到目标
+- 定位：被动聚合源，稳定性通常最好
+- 关键点：`-all` 适合 `full/deep`，不是轻量模式的默认首选
 
-## gau (Get All URLs)
-- `--subs` 提取子域名
-- `--blacklist` 排除静态资源后缀
-- `timeout 20m` 限制 20 分钟
+## gau
+- 定位：从历史 URL 反推出子域名
+- 关键点：先保留 URL 原始结果，再提取 hostname 交给 `dnsx`
+- 价值：对老资产、历史路径和被动发现很有帮助
 
 ## jsubfinder
-- 从 JavaScript 文件中提取子域名/endpoint
-- 需先用 httpx 过滤存活目标
-- 排除 `GetResults content type JS` 噪音行
+- 定位：从前端 JS 中提取子域名/endpoint
+- 关键点：先对输入域名做一次 `httpx --silent` 过滤
+- 特性：结果为 `0` 不一定是异常，常见于无公开 JS 线索的目标
 
-## dnsgen
-- 基于已知子域名生成排列变体
-- 结果 > 1000 行时清空
-
-## alterx
-- ProjectDiscovery 的排列生成工具
-- dnsgen 的补充
-- 结果 > 1000 行时清空
+## dnsgen / alterx
+- 定位：非泛解析场景下的子域名排列补全
+- 规则：只在 `Phase 1` 开启域名变形且确认非泛解析时运行
+- 风险控制：本次新增超过 `1000` 条时直接清空，避免排列爆炸

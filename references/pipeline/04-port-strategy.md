@@ -1,36 +1,23 @@
-# Phase 4 — 端口扫描策略
+# Phase 4 速查表
 
-## naabu 参数
+本文件只解释 Phase 4 的策略取舍。  
+真正执行命令、fallback 和重试逻辑，以 `references/pipeline/full-workflow.md` 为准。
 
-```bash
-naabu -l targets.txt \
-  -exclude-cdn \       # 排除 CDN IP
-  -Pn \                # 跳过 ping 探活
-  -scan-type s \       # SYN 扫描（需 root）
-  -c 50 \              # 并发 50
-  -pts 50 \            # 每端口超时 50ms
-  -iv 4 \              # 重试间隔 4s
-  -rate 10000 \        # 发包速率 10000 pps
-  -p -                 # 全端口 1-65535
-```
+## 端口扫描范围
+- `top-100`：快速摸底
+- `top-1000`：默认平衡点
+- `全端口`：成本最高，只在明确要求时使用
 
-非 root 时 `-scan-type s` 自动降级为 TCP Connect。
+## naabu 使用原则
+- 当前流程默认 `-Pn`，避免主机探活影响结果
+- 非 root 环境下实际会退为 `CONNECT` 风格，不应把 `SYN` 视为硬前提
+- 单次结果偏少时，不直接判定“目标无服务”，后续还有 `httpx` Web 兜底探测
 
-## CDN 过滤
+## CDN / 资产过滤
+- 第一层：`nali`
+- 第二层：`nocdn`
+- 如果 `nali` 或本地数据库异常，允许回退到 RFC1918 / loopback 规则做公网筛选
 
-双层过滤:
-1. **nali**: 地理标签 → 过滤 CloudFlare/Akamai/CDN/CloudFront/Fastly/GitHub
-2. **nocdn**: CDN IP 段数据库，二次过滤
-
-```bash
-cat ips.txt | nali | grep -iEv '(本机地址|局域网|CloudFlare|Akamai|CDN|CloudFront|Fastly|GitHub)' | awk '{print $1}' | nocdn | sort -u
-```
-
-## 内外网分离
-
-```bash
-# 外网
-cat subdomain2ips.txt | nali | grep -v '局域网' | awk '{print $1}' > external.txt
-# 内网
-cat subdomain2ips.txt | nali | grep '局域网' | awk '{print $1}' | dnsx -silent -a -resp > intranet.txt
-```
+## 多目标执行建议
+- Phase 4 已经开始消耗网络资源
+- 多目标场景默认不要并发 Phase 4；只有用户明确要求并发时，才允许少量目标并行

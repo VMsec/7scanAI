@@ -13,6 +13,7 @@
 - 任何步骤失败自动重试 3 次（间隔 2s/4s/8s），anew 保证断点续跑不污染数据
 - 所有 bash 代码块以 `set -o pipefail` 开头，防止管道中间态错误静默丢失
 - Python 工具 git clone 后**必须** `pip3 install -r requirements.txt --break-system-packages`
+- 默认进入自治执行模式：优先自动修依赖、切 fallback、局部重跑，再决定是否中止
 
 ---
 
@@ -82,7 +83,7 @@
 | 2.7 | jsubfinder | JS 分析 (`grep -F` 精确匹配) | `jsubfinder_subdomains/jsubfinder.txt` | — |
 
 **关键细节**:
-- ksubdomain 动态获取本机出口 IP 写入 `ksubdomain.yaml`（含 IP 格式校验）
+- `ksubdomain.yaml` 已存在时直接复用，避免多目标/多次运行反复改写共享配置
 - 所有 `.txt` 写入使用 `anew`（去重追加），阈值触发时用 `truncate -s 0` 清空
 
 ---
@@ -132,13 +133,14 @@
 ```
 - SYN 扫描（需 root），非 root 自动降级 TCP Connect
 - 无结果自动重试 3 次，间隔 2s/4s/8s
+- 对解析成功但 `naabu` 未返回端口的域名，进入 Phase 5 前会用 `httpx` 再做默认协议/默认端口兜底探测
 
 ---
 
 ### Phase 5 — Web Service Probing（Web 探测）
 
 **5.1 httpx 指纹识别 + 智能分类**:
-- 第一遍 httpx（`-silent`）: 从端口列表过滤存活 HTTP 服务
+- 第一遍 httpx（`-silent`）: 从端口列表和兜底域名列表过滤存活 HTTP 服务
 - 第二遍 httpx: 获取状态码/标题/Server/技术栈/CNAME/IP → JSON
 - jq 过滤 null url → `active_webs.txt`
 
@@ -172,8 +174,9 @@
 
 **关键细节**:
 - kscan: 分离 IP:端口 和 域名:端口（`grep -E` 精确 IP 正则和域名正则）
-- afrog: `split -l 500` 分批，每批后 `rm` 临时文件
+- afrog: `split -l 500` 分批，每批后 `rm` 临时文件，自动归档 `json/html/err.log` 到 `afrog_scan_results/`
 - nuclei 模板: 默认使用 `~/nuclei-templates/`（非 `/root/`），DAST 模板从 `/opt/fuzzing-templates` 软链
+- dirsearch: 默认保留并重点研判 `200,401,403,301,302,307,308,405`，智能过滤无结果时回退标准模式，并补扫少量高价值敏感文件
 
 ---
 
@@ -341,7 +344,7 @@ targets/<domain>/
 | nocdn | `go install github.com/r00tSe7en/nocdn@latest` |
 | alterx | `go install github.com/projectdiscovery/alterx/cmd/alterx@latest` |
 | dnsgen | `pip3 install dnsgen --break-system-packages` |
-| uro | `pipx install uro` |
+| uro | `pip3 install uro --break-system-packages` |
 
 ### Python 工具（git clone 后必须 pip install requirements.txt）
 | 工具 | 路径 | 安装 |
@@ -416,6 +419,8 @@ git clone https://github.com/<your-username>/7scanAI.git /opt/code/7scanAI
 ```
 扫 baidu.com 和 qq.com 和 alibaba.com
 ```
+
+默认串行执行。只有你明确要求并发，且机器高于 `4C/4G`，才会放开到 `2-3` 个目标并发；`Phase 6` 默认仍是单目标独占。
 
 ### 生成 HTML 报告
 ```
