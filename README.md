@@ -83,6 +83,7 @@
 | 2.7 | jsubfinder | JS 分析 (`grep -F` 精确匹配) | `jsubfinder_subdomains/jsubfinder.txt` | — |
 
 **关键细节**:
+- `OneForAll` 的 CSV 不能用 `awk -F ","` 直接拆列，必须按真正 CSV 规则解析；否则字段里的逗号会导致错位，出现类似 `,,,,,,,,RapidDNSQuery` 的异常记录
 - `ksubdomain.yaml` 已存在时直接复用，避免多目标/多次运行反复改写共享配置
 - 所有 `.txt` 写入使用 `anew`（去重追加），阈值触发时用 `truncate -s 0` 清空
 

@@ -287,11 +287,30 @@ run_with_watchdog "oneforall" 1200 300 \
   python3 /opt/OneForAll/oneforall.py --target "$DOMAIN" --path="targets/$DOMAIN/oneforall_subdomains/" --req False run
 
 # ⚠️ CSV 解析硬规则 (v1.0.1 修复):
-#   1. tr -d '\r' — 去除 CRLF 行尾, 否则 $NF 匹配 "Brute\r" 而非 "Brute"
-#   2. $NF != "Brute" — 排除 wildcard DNS brute 结果 (泛解析下量产 95k+ 垃圾)
+#   1. 不能用 `awk -F ","` 直接拆列，字段里可能包含逗号，必须按真正 CSV 规则解析
+#   2. 排除最后一列为 "Brute" 的 wildcard DNS brute 结果
 #   3. 当本次新增 >20000 时清空 (与其他子域名工具阈值对齐)
 BEFORE=$(safe_line_count "targets/$DOMAIN/oneforall_subdomains/oneforall.txt")
-cat "targets/$DOMAIN"/oneforall_subdomains/"$DOMAIN".csv | tr -d '\r' | awk -F "," 'NR>1 && $NF != "Brute" {print $6}' | sed '/^$/d' | sort | uniq | anew "targets/$DOMAIN"/oneforall_subdomains/oneforall.txt
+python3 - <<'PY' "targets/$DOMAIN/oneforall_subdomains/$DOMAIN.csv" "targets/$DOMAIN/oneforall_subdomains/oneforall_parsed.txt"
+import csv
+import sys
+
+src, dst = sys.argv[1], sys.argv[2]
+with open(src, newline='', encoding='utf-8', errors='replace') as f, open(dst, 'w', encoding='utf-8') as out:
+    reader = csv.reader(f)
+    next(reader, None)
+    for row in reader:
+        if not row:
+            continue
+        last = row[-1].strip()
+        if last == "Brute":
+            continue
+        if len(row) > 5:
+            sub = row[5].strip()
+            if sub:
+                out.write(sub + "\n")
+PY
+cat "targets/$DOMAIN"/oneforall_subdomains/oneforall_parsed.txt | sort | uniq | anew "targets/$DOMAIN"/oneforall_subdomains/oneforall.txt
 AFTER=$(safe_line_count "targets/$DOMAIN/oneforall_subdomains/oneforall.txt")
 NEW=$((AFTER - BEFORE))
 echo "OneForAll: $AFTER lines (new: $NEW) [Brute excluded]"
