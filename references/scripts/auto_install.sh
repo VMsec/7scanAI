@@ -14,6 +14,22 @@ if [ -f /usr/local/bin/httpx ] && grep -q "from httpx import main" /usr/local/bi
     rm -f /usr/local/bin/httpx
 fi
 
+promote_go_httpx() {
+    local go_bin httpx_bin
+    go_bin="$(go env GOBIN 2>/dev/null)"
+    if [ -z "$go_bin" ]; then
+        go_bin="$(go env GOPATH 2>/dev/null)/bin"
+    fi
+    httpx_bin="$go_bin/httpx"
+
+    if [ -x "$httpx_bin" ]; then
+        mkdir -p /usr/local/bin
+        cp -f "$httpx_bin" /usr/local/bin/httpx
+        chmod +x /usr/local/bin/httpx
+        echo "🔗 已将 Go 版 httpx 覆盖到 /usr/local/bin/httpx"
+    fi
+}
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 MISSING=()
 INSTALL_ONLY="${1:-install}"
@@ -274,6 +290,9 @@ if [ ${#MISSING[@]} -gt 0 ]; then
         esac
     done
 fi
+
+# 优先提升 Go 版 httpx 到 /usr/local/bin/httpx
+promote_go_httpx
 
 # 初始化 nuclei 模板
 echo "  📥 nuclei -ut ..."
