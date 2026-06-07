@@ -292,7 +292,8 @@ targets/<domain>/
 │   ├── high_value_targets.txt
 │   └── leak_risks.txt
 ├── afrog_scan_results/
-│   └── part_*.json
+│   ├── part_*.json
+│   └── *.html
 ├── backup_result/
 │   └── backup_scan.txt
 ├── brute_result/
@@ -307,7 +308,7 @@ targets/<domain>/
 ├── web_screenshots/
 │   ├── gowitness.sqlite3
 │   └── screenshots/*.png
-└── 7scanAI_report.html
+└── <domain>_7scanAI_report.html
 ```
 
 ---

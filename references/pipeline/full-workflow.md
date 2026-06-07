@@ -1110,7 +1110,7 @@ done
 **Phase 7 产物**:
 ```
 targets/$DOMAIN/brute_result/brute_success.txt    (从 kscan 结果提取)
-targets/$DOMAIN/7scanAI_report.html               (Phase 7.3 生成)
+targets/$DOMAIN/${DOMAIN}_7scanAI_report.html     (Phase 7.3 生成)
 ```
 
 ### 7.2 🔍 AI 自动研判（MUST — 不可跳过）
