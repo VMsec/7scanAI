@@ -733,7 +733,7 @@ run_with_watchdog "httpx_fingerprint" 3600 600 \
   "targets/$DOMAIN/active_webs/active_websfinger.json" \
   "targets/$DOMAIN/active_webs/httpx_fingerprint.err.log" -- \
   httpx -l "targets/$DOMAIN"/active_webs/httpx_alive_raw.txt \
-    -location -cdn -td -title -status-code -probe -cname --fc 0 -server -ip --threads 20 \
+    -location -cdn -td -title -status-code -probe -cname -fc 0 -server -ip -retries 1 -t 20 \
     -json -o "targets/$DOMAIN"/active_webs/active_websfinger.json
 
 # JSON → 存活 URL 列表
