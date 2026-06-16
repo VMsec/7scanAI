@@ -13,10 +13,10 @@
 | 端口扫描 | top-100 | top-1000 | 全端口 |
 | HTTP 指纹 | ✅ | ✅ | ✅ |
 | Web 截图 | - | ✅ | ✅ |
-| nuclei 模板 | critical | critical,high,medium | 全部 |
-| afrog | - | critical,high | 全部 |
+| nuclei 模板 | critical | critical,high,medium | critical,high,medium |
+| afrog | - | critical,high | critical,high |
 | kscan 指纹 | - | ✅ | ✅ |
-| kscan hydra | - | - | ✅ |
+| kscan hydra | ✅ | ✅ | ✅ |
 | 目录爆破 | - | ✅(智能) | ✅(全量) |
 | 备份文件扫描 | - | ✅ | ✅ |
 | Katana 爬虫 | - | - | ✅ |
