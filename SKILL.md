@@ -17,6 +17,69 @@ description: 自动化安全侦察与漏洞扫描 pipeline。用户给根域名�
 
 1. 只使用仓库内定义过的命令参数和脚本，禁止凭记忆改写参数。
 2. 扫描结果必须写入 `targets/<domain>/`，禁止直接写入 `targets/` 根目录。
+2.1 **产物路径强制锁定（MUST）**: 所有产物必须写入以下固定路径，**禁止自创子目录、禁止用别名、禁止写回域名根目录**。任一文件不在此表中即为违规：
+
+**Phase 2 产物**:
+| 文件 | 强制路径 |
+|------|---------|
+| oneforall.txt | `targets/$DOMAIN/oneforall_subdomains/oneforall.txt` |
+| ksubdomain.txt | `targets/$DOMAIN/ksubdomain_subdomains/ksubdomain.txt` |
+| subdomainsbrute.txt | `targets/$DOMAIN/subdomainsbrute_subdomains/subdomainsbrute.txt` |
+| subfinder.txt | `targets/$DOMAIN/subfinder_subdomains/subfinder.txt` |
+| gau.txt | `targets/$DOMAIN/gau_subdomains/gau.txt` |
+| jsubfinder.txt | `targets/$DOMAIN/jsubfinder_subdomains/jsubfinder.txt` |
+
+**Phase 3 产物**:
+| 文件 | 强制路径 |
+|------|---------|
+| collect_subdomains.txt | `targets/$DOMAIN/collect_subdomains/collect_subdomains.txt` |
+| active_subdomains2ips.txt | `targets/$DOMAIN/active_subdomains/active_subdomains2ips.txt` |
+| active_subdomains.txt | `targets/$DOMAIN/active_subdomains/active_subdomains.txt` |
+| dnsgen.txt | `targets/$DOMAIN/dnsgen_subdomains/dnsgen.txt` |
+| alterx.txt | `targets/$DOMAIN/alterx_subdomains/alterx.txt` |
+
+**Phase 4 产物**:
+| 文件 | 强制路径 |
+|------|---------|
+| active_ips.txt | `targets/$DOMAIN/active_ips/active_ips.txt` |
+| active_all.txt | `targets/$DOMAIN/active_all/active_all.txt` |
+| active_ports.txt | `targets/$DOMAIN/active_ports/active_ports.txt` |
+
+**Phase 5 产物**:
+| 文件 | 强制路径 |
+|------|---------|
+| active_webs.txt | `targets/$DOMAIN/active_webs/active_webs.txt` |
+| active_websfinger.json | `targets/$DOMAIN/active_webs/active_websfinger.json` |
+| high_value_targets.txt | `targets/$DOMAIN/active_webs/high_value_targets.txt` |
+| leak_risks.txt | `targets/$DOMAIN/active_webs/leak_risks.txt` |
+
+**Phase 6 产物**:
+| 文件 | 强制路径 |
+|------|---------|
+| active_ips_portsfinger.txt | `targets/$DOMAIN/active_ports/active_ips_portsfinger.txt` |
+| active_webs_portsfinger.txt | `targets/$DOMAIN/active_ports/active_webs_portsfinger.txt` |
+| backup_scan.txt | `targets/$DOMAIN/backup_result/backup_scan.txt` |
+| nuclei-templates_fuzzing.txt | `targets/$DOMAIN/nuclei_fuzzing_result/nuclei-templates_fuzzing.txt` |
+| nuclei-DAST_fuzzing.txt | `targets/$DOMAIN/nuclei_fuzzing_result/nuclei-DAST_fuzzing.txt` |
+| katana_urls.txt | `targets/$DOMAIN/nuclei_fuzzing_result/katana_urls.txt` |
+| uro_urls.txt | `targets/$DOMAIN/nuclei_fuzzing_result/uro_urls.txt` |
+| smart_scan_*.txt | `targets/$DOMAIN/dirsearch_result/smart_scan_*.txt` |
+
+**Phase 7 产物**:
+| 文件 | 强制路径 |
+|------|---------|
+| brute_success.txt | `targets/$DOMAIN/brute_result/brute_success.txt` |
+| HTML 报告 | `targets/$DOMAIN/${DOMAIN}_7scanAI_report.html` |
+
+**运行时文件** (`targets/$DOMAIN/runtime/`): `<tool>.pid`、`<tool>.exitcode`
+
+**禁止的路径模式**:
+- ❌ 直接写根目录: `targets/$DOMAIN/collect_subdomains.txt`
+- ❌ 自创别名目录: `targets/$DOMAIN/parsed/`、`ph3/`、`merge/`、`subdomains/`、`scans/`、`httpx/`、`results/`、`raw/`、`ports/`、`phase3/`、`phase4/`、`phase5/`
+- ✅ 唯一合法: `targets/$DOMAIN/<上表子目录>/<文件名>`
+
+违反时必须回退修复: 从错误位置拷到强制路径后删除原文件。
+
 3. 所有 `.txt` 结果文件统一使用 `anew` 写入；阈值清空只允许 `truncate -s 0`。
 4. Phase 1 只允许问一次：端口范围、域名变形、截图开关。确认后全程自动执行，不再追问。
 5. 每个阶段结束必须输出 checkpoint，并列出核心产物文件和行数。
@@ -24,6 +87,11 @@ description: 自动化安全侦察与漏洞扫描 pipeline。用户给根域名�
 7. 输入文件为空时必须跳过对应步骤，不能空跑重量级工具。
 8. Python 依赖必须走系统级安装：`pip3 install --break-system-packages`，禁止虚拟环境。
 9. 所有 bash 代码块必须以 `set -o pipefail` 开头。
+9.1 **pipefail + grep 安全规则**: 带 `pipefail` 时，`grep` 无匹配会返回 1 导致管道中断。以下场景**必须**在前面加 `grep ... || true` 或在 grep 后追加 `|| true`：
+   - 用 `grep -Eo 'domain' ports.txt | anew` 拆分 IP/域名端口时
+   - 用 `grep 'Success' finger.txt | anew` 提取弱口令成功记录时
+   - 任何"可能找不到匹配"的 grep 管线
+   或者改用临时方案：`set +o pipefail` 临时关闭 → 执行 grep 管线 → `set -o pipefail` 恢复。
 10. 长任务必须记录 PID 到 `targets/<domain>/runtime/`，并同时设置总超时和“无进度超时”。
 11. 无进度判定以 raw 产物或错误日志的字节数增长为准；超时后先发 `TERM`，等待 10-15 秒，再发 `KILL`。
 12. 每一步执行都必须显式提示当前状态：开始、完成、跳过、失败重试，不能只在 phase 结束后汇总。
