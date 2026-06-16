@@ -35,6 +35,7 @@ description: 自动化安全侦察与漏洞扫描 pipeline。用户给根域名�
 | collect_subdomains.txt | `targets/$DOMAIN/collect_subdomains/collect_subdomains.txt` |
 | active_subdomains2ips.txt | `targets/$DOMAIN/active_subdomains/active_subdomains2ips.txt` |
 | active_subdomains.txt | `targets/$DOMAIN/active_subdomains/active_subdomains.txt` |
+| active_subdomains_intranet.txt | `targets/$DOMAIN/active_subdomains/active_subdomains_intranet.txt` |
 | dnsgen.txt | `targets/$DOMAIN/dnsgen_subdomains/dnsgen.txt` |
 | alterx.txt | `targets/$DOMAIN/alterx_subdomains/alterx.txt` |
 
