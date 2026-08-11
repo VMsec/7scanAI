@@ -124,6 +124,12 @@ description: 自动化安全侦察与漏洞扫描 pipeline。用户给根域名�
 - 只有用户明确要求并发时，且机器高于 `4C/4G`，才允许并发 `2-3` 个目标
 - `Phase 6` 资源最重，默认按单目标独占执行；不要让多个目标同时跑漏洞阶段
 - 任何时候都优先保证目标间产物隔离，其次才是吞吐量
+- **多目标并行隔离硬规则**（并行时必须满足）:
+  - 每个目标在独立 shell/进程空间中运行，CWD 互不干扰
+  - 所有写 CWD 文件的工具必须先 `pushd "$TARGET_DIR"`（已修: ksubdomain / gowitness / afrog）
+  - `/tmp` 路径必须用 `mktemp -d` 或带 `$$` 防护，禁止多目标共享固定路径
+  - 共享配置（如 `ksubdomain.yaml`）每个目标独立副本到 `$TARGET_DIR/runtime/`
+  - 同一项目根目录同一时刻最多 1 个目标跑 Phase 2.3（ksubdomain 网络设备独占）
 
 ## 执行模式
 
@@ -317,6 +323,61 @@ bash "$SCRIPT_DIR"/references/scripts/auto_install.sh
 - HTML 报告支持单域名和多域名汇总两种入口
 
 执行命令前读取 `references/pipeline/full-workflow.md` 的 Phase 7。
+
+### Phase 8 - Autonomous Exploitation（自主利用攻击）
+
+**触发条件**: Phase 7 AI 研判完成后，存在 ≥1 条 `✅ 确认有效` 或 `⚠️ 待验证` 的漏洞。
+
+**不触发条件**:
+- Phase 7 所有发现均为 `❌ 疑似误报`
+- 用户明确说"不做利用 / 只扫描 / 只探测"
+- quick profile（快速扫描不做利用）
+
+固定顺序（按优先级）：
+
+1. 创建 `targets/$DOMAIN/exploit_result/` 目录
+2. Phase 7.4 生成 `exploit_plan.json`（结构化候选清单，Phase 7→8 数据桥）
+3. Phase 8.1 读取 `exploit_plan.json` 构建优先级队列
+4. 按 playbook 顺序执行利用：弱口令 → RCE → SQLi → 备份泄露 → 默认凭据 → 登录口爆破 → 文件上传 → 注册接口利用 → LFI → SSTI → SSRF → OAuth滥用 → 凭据复用喷洒
+4. 每步成功收集的凭据写 `harvested_credentials.txt`
+5. 凭据复用喷洒：所有收割的凭据测试所有已知服务
+6. 生成利用报告 `targets/$DOMAIN/exploit_result/${DOMAIN}_exploit_report.md`
+
+**执行模式**: AI-driven（非脚本）。AI 读取对应 playbook → 决定 payload → 执行命令 → 判断结果 → 决策下一步。每步都需要 AI 判断力，不能自动化。
+
+必须遵守：
+
+- 每个利用尝试记录: 时间戳、目标、方法、命令、输出、成功/失败
+- 成功获得访问后必须收集环境信息（`id` / `uname -a` / `hostname` / `sudo -l`）
+- 失败后用至少 1 种备选方案重试，仍失败则跳过
+- 收割的凭据写 `anew targets/$DOMAIN/exploit_result/harvested_credentials.txt`
+- 凭据喷洒: 每对 username:password 对每个已知 IP:port 尝试
+- 禁止破坏性操作: 不 `rm -rf`、不 `shutdown`、不 `DROP TABLE`
+
+**Stop 条件**:
+- 获得 root/admin 级别访问权限（可横向移动时继续）
+- 所有 playbook 遍历完毕且无新凭据产出
+- 连续 3 个 playbook 无进展
+
+**安全边界**:
+- sqlmap 限制 `--threads=5`，不跑 `--os-shell` 的破坏性命令
+- 反弹 shell 监听加 `timeout`，不长期驻留端口
+- 不在目标系统写持久化后门（webshell 放在可识别路径，扫描完可清理）
+- 凭据不发送到外部服务
+
+执行前必须读取：
+- `references/pipeline/08-exploitation.md` — 各漏洞类型利用 playbook
+- `references/pipeline/full-workflow.md` 的 Phase 8 — 命令级执行流程
+
+**Phase 8 产物**:
+```
+targets/$DOMAIN/exploit_result/
+├── exploit_log.txt              ← 所有尝试日志 (anew)
+├── exploit_success.txt          ← 成功利用记录 (anew)
+├── harvested_credentials.txt    ← 收割的凭据 (anew)
+├── ${DOMAIN}_exploit_report.md  ← 利用报告
+└── sqlmap/                      ← sqlmap 输出（如有）
+```
 
 ## 决策点
 

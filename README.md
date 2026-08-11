@@ -17,7 +17,7 @@
 
 ---
 
-## 工作流总览（7 个 Phase）
+## 工作流总览（8 个 Phase）
 
 ```
 用户: "扫 baidu.com"
@@ -43,6 +43,11 @@
   │
   └─ Phase 7  Report         统计汇总 → AI 逐条研判
                              → 渗透方向建议 → 生成 HTML 报告
+  │
+  └─ Phase 8  Exploit        AI 自主利用攻击 → 弱口令登录
+                             → SQL注入/备份泄露 → 登录口爆破
+                             → 注册越权 → OAuth滥用 → 凭据喷洒
+                             → 生成利用报告
 ```
 
 ---
@@ -207,6 +212,31 @@ python3 references/scripts/generate_report.py -r targets/
 ```
 离线可用，无 CDN 依赖。含统计卡片、Web 资产表、漏洞发现表、截图预览。
 
+### Phase 8 — Autonomous Exploitation（自主利用攻击）
+
+Phase 7 研判完成后，AI 对确认有效的漏洞执行实际攻击，**不做建议而是直接利用**。
+
+**11 条利用链路（按优先级）**:
+
+| 优先级 | 漏洞类型 | 攻击方式 | 预期成果 |
+|--------|---------|---------|---------|
+| Tier 0 | 弱口令 | SSH/MySQL/Redis/PG/Mongo/FTP 直接登录 | Shell / 数据库访问 |
+| Tier 1 | RCE/命令注入 | 反弹 shell / webshell 部署 | 服务器控制权 |
+| Tier 2 | SQL 注入 | sqlmap --dbs → --dump → 凭据提取 | 数据库数据 / OS shell |
+| Tier 2 | 备份/配置泄露 | 下载 → 解压 → grep 凭据 | 源码 / 数据库密码 |
+| Tier 3 | 默认凭据 | 20 对常用弱口令尝试面板登录 | 后台管理权限 |
+| Tier 3 | 登录口爆破 | Basic Auth / ffuf 表单爆破 | 后台认证绕过 |
+| Tier 3 | 文件上传 | PHP/JSP webshell 上传+验证 | 代码执行 |
+| Tier 4 | LFI/路径穿越 | /etc/passwd → .env → 凭据链 | 配置信息 → RCE |
+| Tier 4 | SSTI | Jinja2/Twig/Freemarker RCE payload | 命令执行 |
+| Tier 4 | SSRF | AWS 元数据 + 内网端口探测 | 云凭据 / 内网拓扑 |
+| Tier 4 | OAuth 滥用 | redirect_uri 绕过 / state 缺失 / scope 越权 | 账号接管 |
+| Tier 5 | 注册接口利用 | 自动注册 → 登录 → 管理功能越权测试 | 越权访问 |
+
+**凭据复用喷洒**: 所有收割的 user:pass 对所有 SSH 端口尝试。
+
+**产物**: `targets/$DOMAIN/exploit_result/` — exploit_log / exploit_success / harvested_credentials / evidence /
+
 ---
 
 ## 关键机制
@@ -312,6 +342,11 @@ targets/<domain>/
 ├── web_screenshots/
 │   ├── gowitness.sqlite3
 │   └── screenshots/*.png
+├── exploit_result/
+│   ├── exploit_log.txt
+│   ├── exploit_success.txt
+│   ├── harvested_credentials.txt
+│   └── evidence/
 └── <domain>_7scanAI_report.html
 ```
 
@@ -459,7 +494,8 @@ git clone https://github.com/<your-username>/7scanAI.git /opt/code/7scanAI
     │   ├── full-workflow.md       # 命令级原始长版流程
     │   ├── 02-subdomain-tools.md  # 子域名工具参数说明
     │   ├── 04-port-strategy.md    # 端口扫描策略
-    │   └── 06-vuln-engines.md     # 漏洞引擎参数说明
+    │   ├── 06-vuln-engines.md     # 漏洞引擎参数说明
+    │   └── 08-exploitation.md     # 漏洞利用 playbook
     └── scripts/
         ├── auto_install.sh        # 环境预检 + 缺失自动安装
         ├── auto_dirsearch.py      # 智能目录爆破（1C1G 自适应）

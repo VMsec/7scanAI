@@ -4,14 +4,19 @@
 #       bash auto_install.sh check    # 仅检测，不安装
 set -e
 
+# ⚠️ INSTALL_ONLY 必须最先赋值，后续所有判断依赖此变量
+INSTALL_ONLY="${1:-install}"
+
 # 自动探测项目根目录（无论从哪个路径执行此脚本）
 SCRIPT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 echo "📍 7scanAI 项目路径: $SCRIPT_DIR"
 
-# 预清理：删除会干扰 Go 版 httpx 判断的 Python 包装器
-if [ -f /usr/local/bin/httpx ] && grep -q "from httpx import main" /usr/local/bin/httpx 2>/dev/null; then
-    echo "🧹 检测到 Python 版 /usr/local/bin/httpx，已删除，优先使用 Go 版 httpx"
-    rm -f /usr/local/bin/httpx
+# 预清理：删除会干扰 Go 版 httpx 判断的 Python 包装器（仅在 install 模式执行）
+if [ "$INSTALL_ONLY" != "check" ]; then
+  if [ -f /usr/local/bin/httpx ] && grep -q "from httpx import main" /usr/local/bin/httpx 2>/dev/null; then
+      echo "🧹 检测到 Python 版 /usr/local/bin/httpx，已删除，优先使用 Go 版 httpx"
+      rm -f /usr/local/bin/httpx
+  fi
 fi
 
 promote_go_httpx() {
@@ -32,7 +37,6 @@ promote_go_httpx() {
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 MISSING=()
-INSTALL_ONLY="${1:-install}"
 
 check_system_pkg() {
     local name=$1 pkg=${2:-$1}
@@ -169,6 +173,14 @@ command -v kscan &>/dev/null && echo -e "  ${GREEN}✅${NC} kscan" || { echo -e 
 command -v csvquote &>/dev/null && echo -e "  ${GREEN}✅${NC} csvquote" || { echo -e "  ${RED}❌${NC} csvquote"; MISSING+=("csvquote"); }
 
 echo ""
+echo "── 渗透利用工具 ──"
+command -v sqlmap &>/dev/null && echo -e "  ${GREEN}✅${NC} sqlmap" || { echo -e "  ${RED}❌${NC} sqlmap"; MISSING+=("sqlmap"); }
+command -v redis-cli &>/dev/null && echo -e "  ${GREEN}✅${NC} redis-cli" || { echo -e "  ${RED}❌${NC} redis-cli"; MISSING+=("apt:redis-tools"); }
+command -v mysql &>/dev/null && echo -e "  ${GREEN}✅${NC} mysql-client" || { echo -e "  ${RED}❌${NC} mysql-client"; MISSING+=("apt:default-mysql-client"); }
+command -v git-dumper &>/dev/null && echo -e "  ${GREEN}✅${NC} git-dumper" || { echo -e "  ${RED}❌${NC} git-dumper"; MISSING+=("pip:git-dumper"); }
+command -v sshpass &>/dev/null && echo -e "  ${GREEN}✅${NC} sshpass" || { echo -e "  ${RED}❌${NC} sshpass"; MISSING+=("apt:sshpass"); }
+
+echo ""
 echo "── Python 工具 ──"
 check_python_tool OneForAll       /opt/OneForAll       shmilylty/OneForAll          /opt/OneForAll/oneforall.py        "cd /opt/OneForAll && mkdir -p results && python3 oneforall.py --help"
 check_python_tool subDomainsBrute /opt/subDomainsBrute  lijiejie/subDomainsBrute    /opt/subDomainsBrute/subDomainsBrute.py
@@ -270,56 +282,81 @@ if [ ${#MISSING[@]} -gt 0 ]; then
                 ;;
             chrome)
                 echo "  🌐 安装 google-chrome ..."
-                echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list
-                apt install -y gnupg2 >/dev/null 2>&1 || true
-                wget https://dl.google.com/linux/linux_signing_key.pub >/dev/null 2>&1 || true
-                apt-key add linux_signing_key.pub >/dev/null 2>&1 || true
+                if ! grep -q 'dl.google.com/linux/chrome/deb/' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null; then
+                    wget -q -O /tmp/google-chrome.gpg https://dl.google.com/linux/linux_signing_key.pub
+                    mkdir -p /etc/apt/keyrings 2>/dev/null
+                    gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg /tmp/google-chrome.gpg 2>/dev/null || true
+                    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+                    rm -f /tmp/google-chrome.gpg
+                fi
                 apt update >/dev/null 2>&1 || true
                 apt install -y google-chrome-stable >/dev/null 2>&1 || echo "    ⚠️ 失败"
                 ;;
             csvquote)
                 echo "  🔨 编译 csvquote ..."
-                cd /opt && git clone https://github.com/adamgordonbell/csvquote.git >/dev/null 2>&1 || true
-                cd /opt/csvquote && go build -o csvquote cmd/csvquote/main.go >/dev/null 2>&1 && cp csvquote /usr/local/bin/ || echo "    ⚠️ 失败"
+                if [ ! -d /opt/csvquote ]; then
+                    cd /opt && git clone https://github.com/adamgordonbell/csvquote.git >/dev/null 2>&1 || echo "    ⚠️ git clone 失败"
+                fi
+                cd /opt/csvquote && go build -o csvquote cmd/csvquote/main.go >/dev/null 2>&1 && cp csvquote /usr/local/bin/ || echo "    ⚠️ 编译失败"
                 ;;
             kscan)
                 echo "  🔨 编译 kscan ..."
-                cd /opt && git clone https://github.com/lcvvvv/kscan >/dev/null 2>&1 || true
-                cd /opt/kscan && go mod tidy >/dev/null 2>&1 && go build -o kscan . >/dev/null 2>&1 && cp kscan ~/go/bin/ || echo "    ⚠️ 失败"
+                if [ ! -d /opt/kscan ]; then
+                    cd /opt && git clone https://github.com/lcvvvv/kscan >/dev/null 2>&1 || echo "    ⚠️ git clone 失败"
+                fi
+                cd /opt/kscan && go mod tidy >/dev/null 2>&1 && go build -o kscan . >/dev/null 2>&1 && cp kscan ~/go/bin/ || echo "    ⚠️ 编译失败"
+                ;;
+            sqlmap)
+                echo "  📥 git clone sqlmap → /opt/sqlmap ..."
+                if [ ! -d /opt/sqlmap ]; then
+                    git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git /opt/sqlmap >/dev/null 2>&1 || echo "    ⚠️ git clone 失败"
+                fi
+                [ -f /opt/sqlmap/sqlmap.py ] && ln -sf /opt/sqlmap/sqlmap.py /usr/local/bin/sqlmap 2>/dev/null
                 ;;
         esac
     done
 fi
 
-# 优先提升 Go 版 httpx 到 /usr/local/bin/httpx
-promote_go_httpx
+# ── 以下操作仅在 install 模式执行，check 模式跳过 ──
+if [ "$INSTALL_ONLY" != "check" ]; then
 
-# 初始化 nuclei 模板
-echo "  📥 nuclei -ut ..."
-nuclei -ut >/dev/null 2>&1 || true
+  # 优先提升 Go 版 httpx 到 /usr/local/bin/httpx
+  promote_go_httpx
 
-# fuzzing-templates 软链
-if [ ! -d ~/nuclei-templates/dast ] && [ -d /opt/fuzzing-templates ]; then
-    ln -s /opt/fuzzing-templates ~/nuclei-templates/dast 2>/dev/null || true
-elif [ ! -d ~/nuclei-templates/dast ] && [ ! -d /opt/fuzzing-templates ]; then
-    echo "  📥 下载 fuzzing-templates ..."
-    git clone https://github.com/projectdiscovery/fuzzing-templates.git /opt/fuzzing-templates >/dev/null 2>&1 || true
-    ln -s /opt/fuzzing-templates ~/nuclei-templates/dast 2>/dev/null || true
-fi
+  # 初始化 nuclei 模板
+  echo "  📥 nuclei -ut ..."
+  nuclei -ut >/dev/null 2>&1 || true
 
-# 创建 swap (2GB) — 严格遵循 autoinstallooo.sh
-if [ ! -f /swap ]; then
-    echo "  📀 创建 swap (2GB) ..."
-    dd if=/dev/zero of=/swap bs=1M count=2048 2>/dev/null
-    mkswap -f /swap >/dev/null 2>&1
-    swapon /swap >/dev/null 2>&1
-fi
+  # afrog POC 下载
+  echo "  📥 afrog -up ..."
+  afrog -up >/dev/null 2>&1 || true
 
-# 配置 locale — 严格遵循 autoinstallooo.sh
-if [ "$(locale 2>/dev/null | head -n 1)" != 'LANG=C.UTF-8' ]; then
-    echo "export LC_ALL=C.UTF-8" >> /etc/profile
-    echo "export LANG=C.UTF-8" >> /etc/profile
-fi
+  # fuzzing-templates 软链
+  if [ ! -d ~/nuclei-templates/dast ] && [ -d /opt/fuzzing-templates ]; then
+      ln -s /opt/fuzzing-templates ~/nuclei-templates/dast 2>/dev/null || true
+  elif [ ! -d ~/nuclei-templates/dast ] && [ ! -d /opt/fuzzing-templates ]; then
+      echo "  📥 下载 fuzzing-templates ..."
+      git clone https://github.com/projectdiscovery/fuzzing-templates.git /opt/fuzzing-templates >/dev/null 2>&1 || true
+      ln -s /opt/fuzzing-templates ~/nuclei-templates/dast 2>/dev/null || true
+  fi
+
+  # 创建 swap (2GB)
+  if [ ! -f /swap ]; then
+      echo "  📀 创建 swap (2GB) ..."
+      dd if=/dev/zero of=/swap bs=1M count=2048 2>/dev/null
+      mkswap -f /swap >/dev/null 2>&1
+      swapon /swap >/dev/null 2>&1
+  fi
+
+  # 配置 locale（检查避免重复追加）
+  if ! grep -q 'LC_ALL=C.UTF-8' /etc/profile 2>/dev/null; then
+      echo "export LC_ALL=C.UTF-8" >> /etc/profile
+  fi
+  if ! grep -q 'LANG=C.UTF-8' /etc/profile 2>/dev/null; then
+      echo "export LANG=C.UTF-8" >> /etc/profile
+  fi
+
+fi  # end install-only block
 
 echo ""
 echo "=========================================="
@@ -346,7 +383,7 @@ smoke "naabu"        "naabu -version 2>&1"
 smoke "httpx"        "httpx -version 2>&1"
 smoke "nuclei"       "nuclei -version 2>&1"
 smoke "katana"       "katana -version 2>&1"
-smoke "anew"         "echo test | anew /tmp/anew_smoke_test 2>&1; rm -f /tmp/anew_smoke_test"
+smoke "anew"         "ANEW_TMP=\$(mktemp); echo test | anew \$ANEW_TMP >/dev/null 2>&1; rm -f \$ANEW_TMP"
 smoke "ksubdomain"   "ksubdomain -version 2>&1"
 smoke "afrog"        "afrog -version 2>&1"
 smoke "gowitness"    "gowitness version 2>&1"
@@ -358,6 +395,11 @@ smoke "dnsgen"       "dnsgen --help 2>&1"
 smoke "csvquote"     "csvquote --help 2>&1"
 smoke "uro"          "uro --help 2>&1"
 smoke "alterx"       "alterx -version 2>&1"
+smoke "sqlmap"       "python3 /opt/sqlmap/sqlmap.py --version 2>&1"
+smoke "redis-cli"    "redis-cli --version 2>&1"
+smoke "mysql"        "mysql --version 2>&1"
+smoke "sshpass"      "sshpass -V 2>&1"
+smoke "git-dumper"   "git-dumper --help 2>&1"
 smoke "OneForAll"           "cd /opt/OneForAll && mkdir -p results && python3 oneforall.py --help 2>&1"
 smoke "subDomainsBrute"     "python3 /opt/subDomainsBrute/subDomainsBrute.py -h 2>&1"
 smoke "dirsearch"           "python3 /opt/dirsearch/dirsearch.py -h 2>&1"

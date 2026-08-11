@@ -106,8 +106,20 @@ def build_filename(url):
     clean = url.replace('https://', '').replace('http://', '').rstrip('/')
     return ''.join(c if c.isalnum() or c in ('.', '-', '_') else '_' for c in clean)
 
+# ── 参考页面缓存（按 hostname，避免同域名重复采集 404 页） ────
+_REF_CACHE: dict = {}
+
 def get_fake_reference(url, temp_dir):
-    """采集 404 参考页面，失败返回 None"""
+    """采集 404 参考页面，失败返回 None。同 hostname 只采集一次。"""
+    # 提取 hostname
+    try:
+        hostname = url.split('://', 1)[1].split('/')[0].split(':')[0]
+    except IndexError:
+        hostname = url
+
+    if hostname in _REF_CACHE:
+        return _REF_CACHE[hostname]
+
     random_str = secrets.token_hex(8)
     fake_path = f"non-exist-{random_str}-ref"
     fake_url = f"{url.rstrip('/')}/{fake_path}"
@@ -115,16 +127,19 @@ def get_fake_reference(url, temp_dir):
 
     try:
         cmd = [
-            'curl', '-s', '-k', '-L', '--max-time', '8', '--retry', '0',
+            'curl', '-s', '-k', '-L', '--max-time', '5', '--retry', '0',
             '-o', ref_file,
             '-A', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             fake_url
         ]
-        subprocess.run(cmd, check=True, timeout=10)
+        subprocess.run(cmd, check=True, timeout=8)
         if os.path.exists(ref_file) and os.path.getsize(ref_file) > 64:
+            _REF_CACHE[hostname] = ref_file
             return ref_file
     except Exception:
         pass
+
+    _REF_CACHE[hostname] = None
     return None
 
 def run_dirsearch_safe(cmd, timeout, hard_timeout):
@@ -165,10 +180,11 @@ def probe_sensitive_paths(url, output_file):
     found = []
     for path in SENSITIVE_PATHS:
         target = f"{url.rstrip('/')}/{path}"
+        body_fd, body_path = tempfile.mkstemp(prefix='dirsearch_sensitive_', suffix='.tmp')
         try:
             cmd = [
                 'curl', '-s', '-k', '-L', '--max-time', '8', '--retry', '0',
-                '-o', '/tmp/dirsearch_sensitive_body.tmp',
+                '-o', body_path,
                 '-w', '%{http_code} %{size_download}',
                 '-A', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 target
@@ -181,9 +197,16 @@ def probe_sensitive_paths(url, output_file):
                 continue
             status_code, size_download = parts
             if status_code == '200' and size_download.isdigit() and int(size_download) > 0:
-                found.append(f"{status_code} - {size_download:>5}B - {target}")
+                # 对齐 dirsearch -O simple 格式: "200 - 12345B - /.env"
+                found.append(f"{status_code} - {size_download:>5}B - /{path}")
         except Exception:
             continue
+        finally:
+            os.close(body_fd)
+            try:
+                os.unlink(body_path)
+            except OSError:
+                pass
 
     if found:
         with open(output_file, 'a', encoding='utf-8', errors='replace') as f:
@@ -196,7 +219,10 @@ def process_url(url, output_dir, temp_dir, timeout, force, use_ffuf=False, threa
     """处理单个 URL"""
     ref_file = None
     try:
-        check_memory()
+        # 低内存时等待，最多尝试 6 次（30s），避免在 OOM 边缘强行启动
+        for _ in range(6):
+            if check_memory():
+                break
 
         target_name = build_filename(url)
         today = datetime.now().strftime('%Y-%m-%d')
@@ -219,12 +245,13 @@ def process_url(url, output_dir, temp_dir, timeout, force, use_ffuf=False, threa
                 'ffuf', '-u', f'{url.rstrip("/")}/FUZZ',
                 '-w', '/usr/share/wordlists/dirb/common.txt',
                 '-t', str(max(3, DEFAULT_THREADS)),
-                '-fc', '500,502,400,404,405,410,429,503,504',
+                '-fc', '500,502,400,404,410,429,503,504',
                 '-r', '-maxtime', str(timeout),
                 '-of', 'plain', '-o', output_file,
             ]
             if ref_file:
-                cmd += ['-fr', open(ref_file, errors='replace').read(200)[:200]]
+                with open(ref_file, 'r', errors='replace') as rf:
+                    cmd += ['-fr', rf.read(200)]
         else:
             # dirsearch 模式（默认）
             cmd = [
@@ -247,11 +274,13 @@ def process_url(url, output_dir, temp_dir, timeout, force, use_ffuf=False, threa
             if WORDLIST:
                 cmd += ['-w', WORDLIST]
 
-        success, _ = run_dirsearch_safe(cmd, timeout, HARD_KILL_TIMEOUT)
+        success, output = run_dirsearch_safe(cmd, timeout, HARD_KILL_TIMEOUT)
 
         # 如果智能过滤模式没有产物，回退到不带 exclude-response 的标准模式，
         # 避免参考页策略与目标响应过于相似时把真实结果全部过滤掉。
-        if (not success or not os.path.exists(output_file) or os.path.getsize(output_file) == 0) and not use_ffuf:
+        # 注意：不依赖 success 判断 —— 进程超时被杀但已写出部分结果时，保留产物不覆盖。
+        output_ok = os.path.exists(output_file) and os.path.getsize(output_file) > 0
+        if not output_ok and not use_ffuf:
             fallback_cmd = [
                 'python3', '/opt/dirsearch/dirsearch.py',
                 '-u', url,
@@ -278,7 +307,8 @@ def process_url(url, output_dir, temp_dir, timeout, force, use_ffuf=False, threa
 
         # 检查产出
         if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-            lines = sum(1 for _ in open(output_file, errors='replace'))
+            with open(output_file, 'r', errors='replace') as f:
+                lines = sum(1 for _ in f)
             logging.info(f'    ✅ {url} → {lines} 条')
             return True
         else:
@@ -288,12 +318,6 @@ def process_url(url, output_dir, temp_dir, timeout, force, use_ffuf=False, threa
     except Exception as e:
         logging.error(f'  ❌ {url}: {e}')
         return False
-    finally:
-        if ref_file and os.path.exists(ref_file):
-            try:
-                os.remove(ref_file)
-            except:
-                pass
 
 # ── 参数解析 ───────────────────────────────────────────────
 def parse_args():
@@ -380,7 +404,9 @@ def main():
     total_findings = 0
     for f in os.listdir(result_dir):
         if f.startswith('smart_scan_'):
-            total_findings += sum(1 for _ in open(os.path.join(result_dir, f), errors='replace'))
+            fpath = os.path.join(result_dir, f)
+            with open(fpath, 'r', errors='replace') as fh:
+                total_findings += sum(1 for _ in fh)
     logging.info(f"🏁 完成: {len(urls)} 目标 → {total_findings} 条路径发现")
 
 if __name__ == '__main__':

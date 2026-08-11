@@ -1,6 +1,6 @@
 ---
 name: 7scanai
-description: 自动化安全侦察与漏洞扫描 pipeline。用户给根域名后，按 7scanAI 的七阶段流程完成子域名发现、DNS解析、端口扫描、Web探测、漏洞扫描与报告生成。
+description: 自动化安全侦察与漏洞扫描 pipeline。用户给根域名后，按 7scanAI 的八阶段流程完成子域名发现、DNS解析、端口扫描、Web探测、漏洞扫描、报告生成与自主利用。
 ---
 
 # 7scanAI for Claude Code
@@ -21,3 +21,4 @@ description: 自动化安全侦察与漏洞扫描 pipeline。用户给根域名�
 - `../../../references/pipeline/02-subdomain-tools.md`
 - `../../../references/pipeline/04-port-strategy.md`
 - `../../../references/pipeline/06-vuln-engines.md`
+- `../../../references/pipeline/08-exploitation.md`
