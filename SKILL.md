@@ -71,6 +71,24 @@ description: 自动化安全侦察与漏洞扫描 pipeline。用户给根域名�
 |------|---------|
 | brute_success.txt | `targets/$DOMAIN/brute_result/brute_success.txt` |
 | HTML 报告 | `targets/$DOMAIN/${DOMAIN}_7scanAI_report.html` |
+| exploit_plan.json | `targets/$DOMAIN/exploit_result/exploit_plan.json` |
+
+**Phase 8 产物**:
+| 文件 | 强制路径 |
+|------|---------|
+| exploit_log.txt | `targets/$DOMAIN/exploit_result/exploit_log.txt` |
+| exploit_success.txt | `targets/$DOMAIN/exploit_result/exploit_success.txt` |
+| harvested_credentials.txt | `targets/$DOMAIN/exploit_result/harvested_credentials.txt` |
+| test_accounts.txt | `targets/$DOMAIN/exploit_result/test_accounts.txt` |
+| login_candidates.txt | `targets/$DOMAIN/exploit_result/login_candidates.txt` |
+| register_candidates.txt | `targets/$DOMAIN/exploit_result/register_candidates.txt` |
+| oauth_candidates.txt | `targets/$DOMAIN/exploit_result/oauth_candidates.txt` |
+| all_targets.txt | `targets/$DOMAIN/exploit_result/all_targets.txt` |
+| ssh_targets.txt | `targets/$DOMAIN/exploit_result/ssh_targets.txt` |
+| small_passwords.txt | `targets/$DOMAIN/exploit_result/small_passwords.txt` |
+| 利用报告 | `targets/$DOMAIN/exploit_result/${DOMAIN}_exploit_report.md` |
+| 证据目录 | `targets/$DOMAIN/exploit_result/evidence/` |
+| sqlmap 输出 | `targets/$DOMAIN/exploit_result/sqlmap/` |
 
 **运行时文件** (`targets/$DOMAIN/runtime/`): `<tool>.pid`、`<tool>.exitcode`
 
