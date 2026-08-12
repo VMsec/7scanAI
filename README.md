@@ -403,11 +403,9 @@ bash references/scripts/auto_install.sh
 
 ### 通过 Claude Code 安装
 
-```bash
-/plugin install github.com/<your-username>/7scanAI
-```
 
-安装后，`Claude Code` 会按官方插件规则读取 `.claude-plugin/plugin.json`。
+
+本地让Claude自己安装后，`Claude Code` 会按官方插件规则读取 `.claude-plugin/plugin.json`。
 
 如果你是把这个仓库直接作为当前项目使用，而不是安装插件，则 `Claude Code` 会按官方项目规则读取 `.claude/skills/7scanai/SKILL.md`。
 
