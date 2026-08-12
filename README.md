@@ -41,8 +41,8 @@
   │                          kscan指纹/弱口令 → afrog(分批) → 备份扫描
   │                          → dirsearch → nuclei → katana+fuzz
   │
-  └─ Phase 7  Report         统计汇总 → AI 逐条研判
-                             → 渗透方向建议 → 生成 HTML 报告
+  ├─ Phase 7  Report         统计汇总 → AI 逐条研判
+  │                          → 渗透方向建议 → 生成 HTML 报告
   │
   └─ Phase 8  Exploit        AI 自主利用攻击 → 弱口令登录
                              → SQL注入/备份泄露 → 登录口爆破
@@ -504,8 +504,8 @@ git clone https://github.com/<your-username>/7scanAI.git /opt/code/7scanAI
 
 ## 版本
 
-**v1.0** — 2026-06-04
-
+**v2.0** — 2026-08-12
+- 8 Phase 完整工作流 
 - 7 Phase 完整工作流
 - 3 项 Phase 1 确认（端口 / 域名变形 / 截图）
 - 15 个安全工具集成（7 子域名 + 3 排列/DNS + 6 漏洞引擎）
