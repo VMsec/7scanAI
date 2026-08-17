@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "7scanAI",
     "shortDescription": "自动化安全侦察与漏洞扫描工作流",
-    "longDescription": "给定目标域名后，按 7scanAI 的七阶段流程自动完成子域名发现、DNS 解析、端口扫描、Web 探测、漏洞扫描和结果汇总。",
+    "longDescription": "给定目标域名后，按 7scanAI 的八阶段流程自动完成子域名发现、DNS 解析、端口扫描、Web 探测、漏洞扫描和结果汇总。",
     "developerName": "7scanAI",
     "category": "Security",
     "capabilities": [
