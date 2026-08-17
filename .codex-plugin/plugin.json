@@ -1,7 +1,7 @@
 {
   "name": "7scanai",
   "version": "1.0.0",
-  "description": "自动化安全侦察与漏洞扫描 pipeline，按 7scanAI 原生流程执行子域名发现、DNS解析、端口扫描、Web探测、漏洞扫描与报告生成。",
+  "description": "自动化安全侦察与漏洞扫描 pipeline，按 7scanAI 原生流程执行子域名发现、DNS解析、端口扫描、Web探测、漏洞扫描、报告生成与自主利用。",
   "author": {
     "name": "7scanAI"
   },
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "7scanAI",
     "shortDescription": "自动化安全侦察与漏洞扫描工作流",
-    "longDescription": "给定目标域名后，按 7scanAI 的八阶段流程自动完成子域名发现、DNS 解析、端口扫描、Web 探测、漏洞扫描和结果汇总。",
+    "longDescription": "给定目标域名后，按 7scanAI 的八阶段流程自动完成子域名发现、DNS 解析、端口扫描、Web 探测、漏洞扫描、结果汇总与自主利用。",
     "developerName": "7scanAI",
     "category": "Security",
     "capabilities": [

@@ -2,7 +2,7 @@
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "7scanai",
   "version": "1.0.0",
-  "description": "自动化安全侦察与漏洞扫描 pipeline skill — 子域名发现 → DNS解析 → 端口扫描 → Web指纹 → 漏洞扫描 → 结果聚合。集成 OneForAll/ksubdomain/subfinder/nuclei/afrog/httpx/naabu 等 20+ 工具链。",
+  "description": "自动化安全侦察与漏洞扫描 pipeline skill — 子域名发现 → DNS解析 → 端口扫描 → Web指纹 → 漏洞扫描 → 结果聚合 → 自主利用。集成 OneForAll/ksubdomain/subfinder/nuclei/afrog/httpx/naabu 等 20+ 工具链。",
   "author": {
     "name": "7scanAI"
   },

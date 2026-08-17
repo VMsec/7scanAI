@@ -1,6 +1,6 @@
 # 7scanAI — AI 驱动的自动化安全扫描 Pipeline
 
-> 给 AI 一个根域名，自动完成：子域名发现 → DNS 解析 → 端口扫描 → Web 指纹 → 目录爆破 → 备份扫描 → 漏洞检测 → 结果研判 → HTML 报告
+> 给 AI 一个根域名，自动完成：子域名发现 → DNS 解析 → 端口扫描 → Web 指纹 → 目录爆破 → 备份扫描 → 漏洞检测 → 结果研判 → HTML 报告 → 自主利用
 
 ## 设计理念
 
@@ -503,8 +503,7 @@ git clone https://github.com/<your-username>/7scanAI.git /opt/code/7scanAI
 ## 版本
 
 **v2.0** — 2026-08-12
-- 8 Phase 完整工作流 
-- 7 Phase 完整工作流
+- 8 Phase 完整工作流
 - 3 项 Phase 1 确认（端口 / 域名变形 / 截图）
 - 15 个安全工具集成（7 子域名 + 3 排列/DNS + 6 漏洞引擎）
 - DOMAIN 路径穿越校验
