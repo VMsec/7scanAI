@@ -224,7 +224,7 @@ if [ ${#MISSING[@]} -gt 0 ]; then
         IFS=':' read -r type arg1 arg2 <<< "$item"
         if [ "$type" = "goenv" ]; then
             echo "  🔧 安装 Go 环境 (严格遵循 autoinstallooo.sh) ..."
-            sh -c "$(curl -L https://raw.githubusercontent.com/canha/golang-tools-install-script/master/goinstall.sh | bash -s -- --version 1.26.3)" >/dev/null 2>&1
+            sh -c "$(curl -L https://raw.githubusercontent.com/canha/golang-tools-install-script/master/goinstall.sh | bash)" >/dev/null 2>&1
             if command -v go >/dev/null 2>&1; then
                 echo -e "    ${GREEN}✅${NC} Go 安装成功!"
             else
