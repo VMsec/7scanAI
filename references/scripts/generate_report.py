@@ -216,7 +216,12 @@ def load_vulns(domain_dir):
                     vulns.append({'source': 'kscan', 'detail': line[:300], 'severity': 'high'})
 
     # backup file scan
-    backup_path = os.path.join(domain_dir, 'backup_result', 'backup_scan.txt')
+    # ⚠️ 必须优先读 soft404 过滤后的 clean 文件。
+    # raw 文件里混着 catch-all 站点对任意路径都返回 200 造成的误报
+    # （实测 17 条"备份泄露"全是软404），直接读 raw 会让报告出现高危误报。
+    backup_clean = os.path.join(domain_dir, 'backup_result', 'backup_scan_clean.txt')
+    backup_raw = os.path.join(domain_dir, 'backup_result', 'backup_scan.txt')
+    backup_path = backup_clean if os.path.exists(backup_clean) else backup_raw
     if os.path.exists(backup_path):
         with open(backup_path, errors='replace') as f:
             for line in f:
@@ -224,6 +229,28 @@ def load_vulns(domain_dir):
                 if line:
                     severity = 'high' if any(k in line.lower() for k in ['.git', '.env', '.sql', 'backup', 'dump']) else 'medium'
                     vulns.append({'source': 'backup-scan', 'detail': line[:300], 'severity': severity})
+
+    # dirsearch findings
+    # ⚠️ 只读 dirsearch_filter.py 产出的 clean 文件，绝不读 smart_scan_*.txt 原始结果。
+    # 原始结果里 SPA 站点会把**每个**字典路径都报成 200 命中
+    # （实测 11 条"源码泄露"全是各站 index.html）。
+    ds_clean = os.path.join(domain_dir, 'dirsearch_result', 'dirsearch_clean.txt')
+    if os.path.exists(ds_clean):
+        with open(ds_clean, errors='replace') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    severity = 'high' if any(k in line.lower() for k in ['.git', '.env', '.sql', 'backup', 'dump', 'swagger', 'actuator']) else 'medium'
+                    vulns.append({'source': 'dirsearch', 'detail': line[:300], 'severity': severity})
+
+    # dirsearch 待人工确认项 —— 单独标注，不计入严重度统计
+    ds_unver = os.path.join(domain_dir, 'dirsearch_result', 'dirsearch_unverified.txt')
+    if os.path.exists(ds_unver):
+        with open(ds_unver, errors='replace') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    vulns.append({'source': 'dirsearch-unverified', 'detail': line[:300], 'severity': 'medium'})
 
     return vulns
 
@@ -307,7 +334,10 @@ def collect_stats(domain_dir):
     s['ports'] = count_lines(os.path.join(base, 'active_ports', 'active_ports.txt'))
     s['web'] = count_lines(os.path.join(base, 'active_webs', 'active_webs.txt'))
     s['nuclei'] = count_lines(os.path.join(base, 'nuclei_fuzzing_result', 'nuclei-templates_fuzzing.txt'))
-    s['backup'] = count_lines(os.path.join(base, 'backup_result', 'backup_scan.txt'))
+    # 优先统计 soft404 过滤后的 clean 文件（见 load_vulns 中的说明）
+    _bclean = os.path.join(base, 'backup_result', 'backup_scan_clean.txt')
+    _braw = os.path.join(base, 'backup_result', 'backup_scan.txt')
+    s['backup'] = count_lines(_bclean if os.path.exists(_bclean) else _braw)
     s['brute'] = count_lines(os.path.join(base, 'brute_result', 'brute_success.txt'))
     s['exploit_success'] = count_lines(os.path.join(base, 'exploit_result', 'exploit_success.txt'))
     s['exploit_creds'] = count_lines(os.path.join(base, 'exploit_result', 'harvested_credentials.txt'))

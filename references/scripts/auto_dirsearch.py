@@ -147,33 +147,57 @@ def run_dirsearch_safe(cmd, timeout, hard_timeout):
     安全执行 dirsearch:
     - 进程组隔离 (os.setpgrp)
     - timeout 后先 SIGTERM，再等 10s → SIGKILL
+    - hard_timeout: 绝对上限。dirsearch 在慢速目标上会持续打印进度条，
+      令调用方的"无进度超时"永不触发；到点必须无条件终止。
     - 返回值: (success: bool, output: str)
     """
+    proc = None
     try:
+        # 先杀进程组，再等回收；killpg 比 kill 更能清掉 dirsearch 的子孙进程
+        def _terminate(reason):
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                proc.wait(timeout=10)
+            except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
+                logging.warning(f"💀 SIGTERM 无效，发送 SIGKILL ({reason})")
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    proc.wait(timeout=5)
+                except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
+                    pass
+
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             preexec_fn=os.setpgrp  # 进程组隔离，防止僵尸子进程
         )
+
+        # 单次等待取 timeout 与 hard_timeout 的较小值；
+        # 若等待达 hard_timeout，说明硬上限已到，必须强杀。
+        started_at = time.monotonic()
+        wait_left = min(timeout, hard_timeout)
         try:
-            stdout, _ = proc.communicate(timeout=timeout)
+            stdout, _ = proc.communicate(timeout=wait_left)
             return proc.returncode == 0, stdout.decode(errors='replace')
         except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - started_at
+            if elapsed >= hard_timeout:
+                logging.warning(f"💀 达到硬上限 {hard_timeout}s，强制终止")
+                _terminate("hard-deadline")
+                return False, "HARD_TIMEOUT_KILLED"
             logging.warning(f"⏰ 超时 {timeout}s，发送 SIGTERM...")
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                logging.warning(f"💀 SIGTERM 无效，发送 SIGKILL...")
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    proc.wait(timeout=5)
-                except:
-                    pass
+            _terminate("timeout")
             return False, "TIMEOUT_KILLED"
     except Exception as e:
         return False, str(e)
+    finally:
+        # 任何异常路径（含 KeyboardInterrupt）都不能留下悬挂的进程组
+        if proc is not None and proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
 
 def probe_sensitive_paths(url, output_file):
     """补扫少量高价值敏感文件，弥补字典/过滤策略漏报"""
