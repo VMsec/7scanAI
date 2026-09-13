@@ -19,6 +19,14 @@
 ## ihoneyBakFileScan
 - 定位：备份泄露和敏感文件暴露
 - 价值：对 `db.sql`、`.env`、源码压缩包这类高价值泄露点非常有效
+- ⚠️ **必须做软404过滤（MUST，见 full-workflow 6.3.1）**：
+  该工具判定命中的依据是「该路径返回了非空响应」，
+  任何配了 catch-all / SPA fallback 的站点会把字典里**每个**路径都判为命中。
+  - 实测：某次扫描 17 条 `.dump` 命中全部来自同一 host、响应整齐 21 字节，
+    用随机路径复测返回**完全相同**的响应 ⇒ 全是误报
+  - 过滤：`python3 references/scripts/soft404_check.py <raw> --out-dir DIR`
+  - 产物三分类：`backup_scan_clean.txt` / `_soft404.txt` / `_unverified.txt`
+  - **报告与研判只能引用 `backup_scan_clean.txt`，禁止引用 raw**
 
 ## auto_dirsearch
 - 定位：目录/文件爆破 + 敏感文件补扫
@@ -27,6 +35,18 @@
   - 无结果时回退标准模式
   - 再补一层少量高价值敏感文件直探
 - 结果保留策略：重点保留 `200,401,403,301,302,307,308,405`
+- ⚠️ **必须做软404过滤（MUST，见 full-workflow 6.4.1）**：
+  dirsearch 判定命中的依据是「路径返回 200」，
+  SPA 站点对**任意路径**都返回 `index.html` + 200，导致字典里每条路径都"命中"。
+  - 实测（**最具迷惑性**）：11 个高价值目标全部报 `200 - <N>B - /.env`，
+    体积 **882B ~ 108539B 各不相同**，极易被当成真实的配置泄露，
+    实际全是各站 `index.html` 的 SPA fallback
+  - 过滤：`python3 references/scripts/dirsearch_filter.py <dirsearch_result/> --out-dir DIR`
+  - 产物三分类：`dirsearch_clean.txt` / `_soft404.txt` / `_unverified.txt`
+  - **报告与研判只能引用 `dirsearch_clean.txt`，禁止引用 raw `smart_scan_*.txt`**
+  - 注意 clean 文件行格式与 raw 不同：
+    `200 - 1234B - https://host/path [text/html]`（含完整 URL 与 Content-Type），
+    直接套用 raw 的 `grep -oE '/[^ ]+'` 路径提取会失效
 
 ## nuclei
 - 定位：模板化漏洞扫描

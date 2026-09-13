@@ -55,16 +55,28 @@ description: 自动化安全侦察与漏洞扫描 pipeline。用户给根域名�
 | leak_risks.txt | `targets/$DOMAIN/active_webs/leak_risks.txt` |
 
 **Phase 6 产物**:
-| 文件 | 强制路径 |
-|------|---------|
-| active_ips_portsfinger.txt | `targets/$DOMAIN/active_ports/active_ips_portsfinger.txt` |
-| active_webs_portsfinger.txt | `targets/$DOMAIN/active_ports/active_webs_portsfinger.txt` |
-| backup_scan.txt | `targets/$DOMAIN/backup_result/backup_scan.txt` |
-| nuclei-templates_fuzzing.txt | `targets/$DOMAIN/nuclei_fuzzing_result/nuclei-templates_fuzzing.txt` |
-| nuclei-DAST_fuzzing.txt | `targets/$DOMAIN/nuclei_fuzzing_result/nuclei-DAST_fuzzing.txt` |
-| katana_urls.txt | `targets/$DOMAIN/nuclei_fuzzing_result/katana_urls.txt` |
-| uro_urls.txt | `targets/$DOMAIN/nuclei_fuzzing_result/uro_urls.txt` |
-| smart_scan_*.txt | `targets/$DOMAIN/dirsearch_result/smart_scan_*.txt` |
+| 文件 | 强制路径 | 报告可引用 |
+|------|---------|-----------|
+| active_ips_portsfinger.txt | `targets/$DOMAIN/active_ports/active_ips_portsfinger.txt` | ✅ |
+| active_webs_portsfinger.txt | `targets/$DOMAIN/active_ports/active_webs_portsfinger.txt` | ✅ |
+| backup_scan.txt | `targets/$DOMAIN/backup_result/backup_scan.txt` | ❌ raw，仅中间产物 |
+| backup_scan_clean.txt | `targets/$DOMAIN/backup_result/backup_scan_clean.txt` | ✅ |
+| backup_scan_soft404.txt | `targets/$DOMAIN/backup_result/backup_scan_soft404.txt` | ❌ 软404，禁止引用 |
+| backup_scan_unverified.txt | `targets/$DOMAIN/backup_result/backup_scan_unverified.txt` | ⚠️ 需人工确认 |
+| smart_scan_*.txt | `targets/$DOMAIN/dirsearch_result/smart_scan_*.txt` | ❌ raw，仅中间产物 |
+| dirsearch_clean.txt | `targets/$DOMAIN/dirsearch_result/dirsearch_clean.txt` | ✅ |
+| dirsearch_soft404.txt | `targets/$DOMAIN/dirsearch_result/dirsearch_soft404.txt` | ❌ 软404，禁止引用 |
+| dirsearch_unverified.txt | `targets/$DOMAIN/dirsearch_result/dirsearch_unverified.txt` | ⚠️ 需人工确认 |
+| tier_a_highvalue.txt | `targets/$DOMAIN/active_webs/tier_a_highvalue.txt` | ⚠️ 仅启用分级时存在 |
+| tier_b_200.txt | `targets/$DOMAIN/active_webs/tier_b_200.txt` | ⚠️ 仅启用分级时存在 |
+| tier_c_other.txt | `targets/$DOMAIN/active_webs/tier_c_other.txt` | ⚠️ 仅启用分级时存在 |
+| nuclei-templates_fuzzing.txt | `targets/$DOMAIN/nuclei_fuzzing_result/nuclei-templates_fuzzing.txt` | ✅ |
+| nuclei-DAST_fuzzing.txt | `targets/$DOMAIN/nuclei_fuzzing_result/nuclei-DAST_fuzzing.txt` | ✅ |
+| katana_urls.txt | `targets/$DOMAIN/nuclei_fuzzing_result/katana_urls.txt` | ✅ |
+| uro_urls.txt | `targets/$DOMAIN/nuclei_fuzzing_result/uro_urls.txt` | ✅ |
+
+> **raw 与 clean 的关系**: `backup_scan.txt` / `smart_scan_*.txt` 是引擎原始输出，
+> **含软404误报，禁止写入报告**；必须经 6.3.1 / 6.4.1 过滤后引用 `*_clean.txt`。
 
 **Phase 7 产物**:
 | 文件 | 强制路径 |
@@ -86,6 +98,8 @@ description: 自动化安全侦察与漏洞扫描 pipeline。用户给根域名�
 | all_targets.txt | `targets/$DOMAIN/exploit_result/all_targets.txt` |
 | ssh_targets.txt | `targets/$DOMAIN/exploit_result/ssh_targets.txt` |
 | small_passwords.txt | `targets/$DOMAIN/exploit_result/small_passwords.txt` |
+| sqli_request.txt | `targets/$DOMAIN/exploit_result/sqli_request.txt` |
+| admin_paths_to_test.txt | `targets/$DOMAIN/exploit_result/admin_paths_to_test.txt` |
 | 利用报告 | `targets/$DOMAIN/exploit_result/${DOMAIN}_exploit_report.md` |
 | 证据目录 | `targets/$DOMAIN/exploit_result/evidence/` |
 | sqlmap 输出 | `targets/$DOMAIN/exploit_result/sqlmap/` |
@@ -114,6 +128,15 @@ description: 自动化安全侦察与漏洞扫描 pipeline。用户给根域名�
 10. 长任务必须记录 PID 到 `targets/<domain>/runtime/`，并同时设置总超时和“无进度超时”。
 11. 无进度判定以 raw 产物或错误日志的字节数增长为准；超时后先发 `TERM`，等待 10-15 秒，再发 `KILL`。
 12. 每一步执行都必须显式提示当前状态：开始、完成、跳过、失败重试，不能只在 phase 结束后汇总。
+13. **`anew` 必须接 `>/dev/null` (MUST)**: `anew` 把每条新增行同时打到 stdout，
+   一次导入 1803 条就会往 AI 上下文灌 ~49KB，足以淹没上下文。所有 `anew` 调用都要重定向。
+14. **`pgrep -f` / `pkill -f` 必须用方括号防自匹配 (MUST)**: pattern 会匹配到发起命令的 shell 自身，
+   导致 `kill -9 $(pgrep -f ...)` 把自己杀掉（退出码 144）。写成 `[a]frog` 形式。
+15. **跨调用变量恢复 (MUST)**: Agent harness 每次 bash 调用都是**独立 shell**，
+   `DOMAIN` / `SCRIPT_DIR` / `TARGET_DIR` / `PORT_RANGE` 等变量**不会保留**。
+   Phase 1 必须生成 `targets/$DOMAIN/runtime/env.sh`；
+   **之后每次 bash 调用的第一行必须** `source targets/$DOMAIN/runtime/env.sh`。
+   全流程 40+ 处依赖这些变量，不恢复会得到空路径或 `unbound variable`。
 
 ## 自治执行
 
@@ -159,8 +182,42 @@ description: 自动化安全侦察与漏洞扫描 pipeline。用户给根域名�
 - Phase 2 参数补充：`references/pipeline/02-subdomain-tools.md`
 - Phase 4 参数补充：`references/pipeline/04-port-strategy.md`
 - Phase 6 参数补充：`references/pipeline/06-vuln-engines.md`
+- **长任务执行库（MUST）**：`references/scripts/watchdog_lib.sh`
 
 如果你需要照着原始长版逐步执行，优先读取 `references/pipeline/full-workflow.md`。它是当前权威命令集。
+
+### 长任务执行模型（MUST）
+
+AI Agent harness（Claude Code / Codex）的 bash 工具**每次调用是独立 shell**，单次调用有硬性超时上限（通常 10 分钟）。
+因此**禁止**用阻塞式轮询跑长扫描——超过 10 分钟的扫描会被 harness 强杀且成果丢失。
+
+必须使用脱离式库：
+
+```bash
+export WD_RUNTIME="$TARGET_DIR/runtime"
+source "$SCRIPT_DIR/references/scripts/watchdog_lib.sh"
+
+# 阻塞式：返回时任务已结束，退出码即扫描退出码（后续步骤依赖其产物时用这个）
+wd_run   <name> <total_s> <idle_s> <progress_file> <err_file> -- <cmd...>
+
+# 非阻塞式：立即返回，适合边跑边做别的事的长任务
+wd_start <name> <total_s> <idle_s> <progress_file> <err_file> -- <cmd...>
+
+wd_poll  <name>      # 查状态并打印; 返回 0=仍在运行, 1=已结束
+wd_exitcode <name>   # 取已完成任务的退出码
+wd_wait  <name> 540  # 受限阻塞等待, 返回任务退出码; 124=仍在后台跑
+wd_kill  <name>      # TERM -> 15s -> KILL
+```
+
+> ⚠️ **命名陷阱**: 文档早期版本用的 `run_with_watchdog` 是**阻塞**语义。
+> 若直接换成非阻塞的 `wd_start`，下一步会在**文件还没生成时**继续执行，静默产生空结果。
+> 保留阻塞语义必须用 `wd_run`（参数完全一致）。
+> `wd_poll` 的返回值**不是**退出码——它 0/1 表示运行/结束，
+> 退出码请用 `wd_exitcode` 取（混用会把"成功完成"误判成"还在跑"）。
+
+**进度判定 = 输出字节增长 OR CPU 增长率 ≥ `WD_MIN_CPU_PCT`（默认 20%）**：
+- 只看字节数会**误杀**缓冲输出的健康进程（subDomainsBrute 实测 0 字节跑 40 分钟）
+- 只看 CPU 增长会**漏杀**被目标 RST 拖住的僵尸进程（jsubfinder 实测 0.04% CPU 缓慢增长）
 
 ## Phase 编排
 
@@ -237,7 +294,8 @@ bash "$SCRIPT_DIR"/references/scripts/auto_install.sh
 
 - 子域名工具本次新增超过 `20000` 条时清空对应结果文件
 - `OneForAll` 必须排除 CSV 末列为 `Brute` 的结果
-- `ksubdomain` 必须在项目根目录运行，并先校验本机出口 IP 再写 `ksubdomain.yaml`
+- `ksubdomain` 必须从**每目标独立目录**运行（`$TARGET_DIR/runtime/ksubdomain_work/`），
+  并先校验本机出口 IP 再写该目录下的 `ksubdomain.yaml`（避免多目标并发时共享配置冲突）
 
 执行命令前读取：
 
@@ -276,7 +334,9 @@ bash "$SCRIPT_DIR"/references/scripts/auto_install.sh
 
 - `top-100` / `top-1000` / `全端口` 三档策略不能混用
 - 无结果时允许自动重试
-- SYN 扫描需要 root，不满足时允许降级
+- SYN 扫描需要 root；**非 root 时必须显式降级为 TCP Connect（`-scan-type c`）**。
+  实现方式：先 `id -u` 判定，非 root 直接用 `c`；SYN 报权限错误时再自动降一级重试
+  （不靠"看起来是 root"猜测，也不让整轮重试白跑 3 次）
 
 执行命令前读取：
 
@@ -314,10 +374,39 @@ bash "$SCRIPT_DIR"/references/scripts/auto_install.sh
 
 必须遵守：
 
+- **规模守卫（MUST，见 full-workflow 6.0）**: 启动重型引擎（afrog/nuclei/dirsearch）前，
+  必须用「目标数 × POC 数 ÷ **实测吞吐**」显式估算耗时，**按 24 小时阈值二选一**：
+
+  | 预计耗时 | 规则 |
+  |---------|------|
+  | **≤ 24 小时** | **全量覆盖扫描**（默认）—— 代价可接受时优先保证覆盖完整 |
+  | **> 24 小时** | **优化规则扫描**（分级）—— 实际不可完成时优先保证能出结果 |
+
+  - 必须**先输出规模评估**（目标数 / 实测吞吐 / 预计耗时）并声明采用哪条规则
+  - **实测吞吐是硬要求**，不得用经验值估算；吞吐随目标成分变化可达 8 倍（4.3 vs 35 task/s）
+  - 用户可覆盖：明确要求"不管多久都全量"⇒ 全量；明确要求"启用分级"⇒ 立即分级，不受阈值限制
+  - 分级规则（Tier A/B/C）：
+    - **Tier A** = `status_code==200` 且 title 命中高价值正则（admin/管理/后台/login/…）→ 全量引擎
+    - **Tier B** = 其余 `200` → nuclei + backup
+    - **Tier C** = 403/302/404/5xx 等 → 仅 backup，不跑重型引擎
+  - 一旦启用分级，**触发原因**、分级规则、各 Tier 数量、实测吞吐、覆盖边界
+    **必须写入 checkpoint 与最终报告**
+  - 分级不得改变 Phase 1 已确认的端口范围 / 变形开关 / 截图开关
 - `kscan` 以 `active_ports.txt` 为输入，为空时只跳过 6.1
 - `afrog` / `备份扫描` / `dirsearch` / `nuclei` / `katana + DAST` 以 `active_webs.txt` 为输入，为空时跳过 6.2-6.6
 - `afrog` 必须分批
 - `katana` / `nuclei DAST` 只在上游输入非空时运行
+- **备份扫描必须做软 404 基线校验（MUST，见 full-workflow 6.3.1）**：
+  `ihoneyBakFileScan` 对配了 catch-all 的站点会把任意路径都判为命中。
+  必须对每个命中 host 用随机不存在路径复测，响应一致 ⇒ 判为软 404 剔除。
+  报告与 AI 研判只能引用 `backup_scan_clean.txt`，禁止引用 raw 文件。
+- **dirsearch 结果必须做软 404 过滤（MUST，见 full-workflow 6.4.1）**：
+  SPA 站点会对任意路径返回 index.html + 200，导致字典里每条路径都"命中"。
+  **实测：11 个高价值目标全部报 `/.env` 命中、体积 882B~108539B 不等，
+  看起来像真实配置泄露，实际全是各站 index.html。**
+  必须运行 `references/scripts/dirsearch_filter.py`，报告只能引用
+  `dirsearch_clean.txt`；`dirsearch_soft404.txt` 禁止引用；
+  `dirsearch_unverified.txt` 必须人工确认后才可用。
 
 执行命令前读取：
 
@@ -356,10 +445,11 @@ bash "$SCRIPT_DIR"/references/scripts/auto_install.sh
 1. 创建 `targets/$DOMAIN/exploit_result/` 目录
 2. Phase 7.4 生成 `exploit_plan.json`（结构化候选清单，Phase 7→8 数据桥）
 3. Phase 8.1 读取 `exploit_plan.json` 构建优先级队列
-4. 按 playbook 顺序执行利用：弱口令 → RCE → SQLi → 备份泄露 → 默认凭据 → 登录口爆破 → 文件上传 → 注册接口利用 → LFI → SSTI → SSRF → OAuth滥用 → 凭据复用喷洒
-4. 每步成功收集的凭据写 `harvested_credentials.txt`
-5. 凭据复用喷洒：所有收割的凭据测试所有已知服务
-6. 生成利用报告 `targets/$DOMAIN/exploit_result/${DOMAIN}_exploit_report.md`
+4. 按 **tier 顺序**执行利用：弱口令 → RCE → SQLi → 备份泄露 → 默认凭据 → 登录口爆破 → 文件上传 → LFI → SSTI → SSRF → OAuth滥用 → 注册接口利用 → 凭据复用喷洒
+   （注：注册接口利用是 **Tier 5 最后一级**，排在 LFI/SSTI/SSRF/OAuth 之后）
+5. 每步成功收集的凭据写 `harvested_credentials.txt`；每次尝试都记入 `exploit_log.txt`
+6. 凭据复用喷洒：所有收割的凭据测试所有已知服务
+7. 生成利用报告 `targets/$DOMAIN/exploit_result/${DOMAIN}_exploit_report.md`
 
 **执行模式**: AI-driven（非脚本）。AI 读取对应 playbook → 决定 payload → 执行命令 → 判断结果 → 决策下一步。每步都需要 AI 判断力，不能自动化。
 

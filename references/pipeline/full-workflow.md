@@ -30,7 +30,7 @@
 3. **增量阈值**:子域名工具本次新增 > 20000 条时清空，dnsgen/alterx 本次新增 > 1000 条时清空（BEFORE/AFTER 取差值，防 anew 累积误判）
 4. **扫描前确认，扫描中不问**:Phase 1 一次性确认端口范围、域名变形、截图三个选项，之后全程自动执行，不再询问
 5. **每阶段结束列出产物 .txt 文件及其行数**
-6. **断点续跑 + 自动重试**:每步命令失败或超时，自动重试最多 3 次。Phase 2/3 轻量命令重试间隔 2s/4s/8s；Phase 4 端口扫描和 Phase 6 漏洞扫描重试间隔 30s/60s/120s（扫描工具为资源密集型，短间隔无意义）。3 次都失败则记录失败原因并继续下一步。anew 保证重试不会污染已有结果
+6. **断点续跑 + 自动重试**:每步命令失败或超时，自动重试最多 3 次。Phase 2/3 轻量命令重试间隔 2s/4s/8s；Phase 4 端口扫描、Phase 5 截图、Phase 6 漏洞扫描重试间隔 30s/60s/120s（资源密集型工具失败常因本机/链路被占满，短间隔重试无意义）。3 次都失败则记录失败原因并继续下一步。anew 保证重试不会污染已有结果
 7. **Python 工具安装硬规则**: 所有 Python 依赖**必须**安装为系统级包，使用 `pip3 install --break-system-packages`，**禁止**使用 pyenv / virtualenv / pipx 等虚拟环境。每个 Python 工具 git clone 后**必须**立即执行 `pip3 install -r requirements.txt --break-system-packages`，不可跳过。工具检测时通过 `python3 <entrypoint> -h` 验证依赖是否完整安装
 8. **所有 bash 代码块必须以 `set -o pipefail` 开头**:管道中任何命令失败都会传递退出码，防止中间态错误被静默吞掉
 9. **超时设置**: Bash 工具的 timeout 参数必须根据扫描阶段设置足够长，禁止一刀切 10 分钟：
@@ -74,6 +74,54 @@
       - afrog 批次文件为 0 → 跳过该批次
       - uro_urls.txt 为 0 → 跳过 nuclei DAST
     - 跳过时输出 `⏭️ <步骤名>: 输入为空，跳过`
+
+15. **`anew` 必须重定向 stdout (MUST)**: `anew` 会把**每一条新增行**同时打到 stdout。
+    在 Agent 场景下，一次导入 1803 条子域名就会往 AI 上下文里灌 ~49KB 文本，直接淹没上下文。
+    **所有 `anew` 调用必须接 `>/dev/null`**（除了确实要展示新增内容的场景）。
+    ```bash
+    # ❌ 错: 刷屏
+    cat sub.txt | anew all.txt
+    # ✅ 对
+    cat sub.txt | anew all.txt >/dev/null
+    ```
+
+16. **`pgrep -f` / `pkill -f` 自匹配陷阱 (MUST)**: 用 `pgrep -f <pattern>` 时，
+    pattern 会匹配到**发起命令的 shell 自身**（因为 pattern 就写在它的命令行里），
+    导致 `kill -9 $(pgrep -f ...)` 把自己杀掉，命令以 144 退出。
+    **改用方括号技巧**让 pattern 不匹配自身：
+    ```bash
+    # ❌ 错: 会匹配到自己的 shell
+    pkill -f "afrog -T"
+    # ✅ 对
+    pkill -f "[a]frog -T"
+    pgrep -af "[j]subfinder search"
+    ```
+
+17. **长任务执行 API（`references/scripts/watchdog_lib.sh`）**:
+    文档中所有长任务调用统一使用以下两个函数，**不要直接调 `wd_start` 跑有依赖的步骤**：
+
+    | 函数 | 语义 | 用在哪 |
+    |------|------|--------|
+    | `wd_run <name> <total> <idle> <prog> <err> -- <cmd>` | **阻塞**，返回时任务已结束 | 后续步骤依赖其产物的（whois / 子域名工具 / dnsx …） |
+    | `wd_start <name> ...` | **非阻塞**，立即返回 | 需要边跑边做别的事的长任务（nuclei / afrog / kscan …） |
+
+    辅助：`wd_poll <name>` 查状态、`wd_wait <name> [max_s]` 受限等待、`wd_kill <name>` 终止、
+    `wd_finalize_err_log <err> <rc>` 清理日志。
+
+    > ⚠️ **改名陷阱**: 早期版本用的 `run_with_watchdog` 是**阻塞**语义。
+    > 若把它直接换成非阻塞的 `wd_start`，下一步会在**文件还没生成时**继续执行，
+    > 静默产生空结果。要保留阻塞语义必须用 **`wd_run`**。
+    > 两者参数完全一致：`<name> <total> <idle> <progress_file> <err_file> -- <cmd...>`
+
+18. **跨调用变量恢复（MUST）**: Agent harness 每次 bash 调用都是**独立 shell**，
+    `DOMAIN` / `SCRIPT_DIR` / `TARGET_DIR` / `PORT_RANGE` 等变量**不会保留**。
+    本文档全篇 40+ 处使用这些变量，若不恢复会得到空路径或 `unbound variable`。
+    **每次 bash 调用的第一行必须**：
+    ```bash
+    source targets/$DOMAIN/runtime/env.sh    # 相对路径首次用；之后可用绝对路径
+    ```
+    `env.sh` 由 Phase 1 生成（见 Phase 1 对应步骤），内容包含全部变量
+    + `source watchdog_lib.sh`。**未生成 `env.sh` 就直接跑后续步骤 = 违规。**
 
 ---
 
@@ -182,82 +230,81 @@ fi
 echo "✅ 输出目录: targets/$DOMAIN/"
 ls -d targets/$DOMAIN/*/
 
-# 统一 watchdog:
-#   run_with_watchdog <name> <total_timeout_s> <idle_timeout_s> <progress_file> <err_file> -- <command...>
-safe_line_count() {
-  local target_file="$1"
-  [ -f "$target_file" ] && wc -l < "$target_file" || echo 0
-}
+# 统一 watchdog —— 改为脱离式(detached)库, 见 references/scripts/watchdog_lib.sh
+#
+# ⚠️ 为什么不能用原来的"阻塞式 run_with_watchdog":
+#   AI Agent harness(Claude Code / Codex)的 bash 工具**每次调用都是独立 shell**,
+#   且单次调用有硬性超时上限(通常 10 分钟)。原来的实现在当前 shell 里 sleep 轮询,
+#   会导致: 1) 超过 10 分钟的扫描被 harness 强杀, 成果丢失;
+#            2) 函数定义不跨调用保留, 下一次调用就没了。
+#   脱离式实现启动后立即返回, 扫描在独立 session 里继续, 状态落盘, 后续 poll 即可。
+#
+# 用法:
+#   source "$SCRIPT_DIR/references/scripts/watchdog_lib.sh"
+#   wd_start <name> <total_s> <idle_s> <progress_file> <err_file> -- <cmd...>
+#   wd_poll  <name>          # 打印 running/done + exitcode
+#   wd_wait  <name> [max_s]  # 阻塞等待(受限时长), 124=仍在运行
+#   wd_kill  <name>          # TERM -> 15s -> KILL
+#   wd_finalize_err_log <err_file> <exit_code>
+#   safe_line_count <file>
+export WD_RUNTIME="$TARGET_DIR/runtime"
+source "$SCRIPT_DIR/references/scripts/watchdog_lib.sh"
+```
 
-finalize_err_log() {
-  local err_file="$1"
-  local exit_code="$2"
-  local clean_file
+> **进度判定 = 字节增长 OR CPU 增长（有速率门槛）**
+>
+> 只看输出字节数会**误杀健康进程**：`subDomainsBrute` / `afrog` / `ihoneyBakFileScan`
+> 等工具会把结果缓冲到结束时才落盘，扫描期间输出恒为 0 字节。
+> 实测：subDomainsBrute 正常跑 40 分钟、0 字节输出，被旧的纯字节数 watchdog 在 600s 时误杀。
+>
+> 但只看"CPU 是否增长"又会**漏杀僵尸进程**：被目标 RST 拖住的 `jsubfinder`
+> 以 0.04% CPU 缓慢增长，计时器被无限复位。
+>
+> 所以正确判据是：**字节增长 OR CPU 增长率 ≥ `WD_MIN_CPU_PCT`(默认 20%)**。
+> CPU 密集任务(subDomainsBrute ≈ 700 ticks/10s)远高于门槛；僵尸态(≈4 ticks/10s)会被正确判死。
 
-  [ -f "$err_file" ] || return 0
-  clean_file="${err_file}.clean"
+#### Phase 1 收尾：生成跨调用环境文件（MUST）
 
-  perl -pe 's/\r/\n/g; s/\x1b\[[0-9;?]*[ -\/]*[@-~]//g' "$err_file" | \
-    sed '/^[[:space:]]*$/d' > "$clean_file"
-  mv "$clean_file" "$err_file"
+> Agent harness 每次 bash 调用都是**独立 shell**，变量不跨调用保留。
+> 必须把变量固化到 `runtime/env.sh`，后续每次调用的第一行 source 它（见全局规则 18）。
 
-  if [ "$exit_code" -eq 0 ] && ! grep -qiE 'error|warn|failed|timeout|exception|panic|traceback|forbidden|denied|429|500|502|503' "$err_file"; then
-    truncate -s 0 "$err_file"
-  fi
-}
+```bash
+set -o pipefail
 
-run_with_watchdog() {
-  local tool_name="$1"
-  local total_timeout="$2"
-  local idle_timeout="$3"
-  local progress_file="$4"
-  local err_file="$5"
-  shift 5
-  [ "$1" = "--" ] && shift
+cat > "targets/$DOMAIN/runtime/env.sh" <<'ENVEOF'
+#!/usr/bin/env bash
+# 7scanAI 目标环境 —— 每个 bash 调用 source 本文件以恢复状态
+export DOMAIN="__DOMAIN__"
+export WORK_ROOT="__WORK_ROOT__"
+export SCRIPT_DIR="__SCRIPT_DIR__"
+export TARGET_DIR="$WORK_ROOT/targets/$DOMAIN"
+export PORT_RANGE=__PORT_RANGE__        # 1=top-100 2=top-1000 3=全端口
+export PERMUTATION="__PERMUTATION__"    # y/n
+export SCREENSHOT="__SCREENSHOT__"      # y/n
+export WD_RUNTIME="$TARGET_DIR/runtime"
+export WD_POLL_INTERVAL=10
+export WD_MIN_CPU_PCT=20
+source "$SCRIPT_DIR/references/scripts/watchdog_lib.sh"
+cd "$WORK_ROOT" 2>/dev/null || true
+ENVEOF
 
-  mkdir -p "$TARGET_DIR/runtime"
-  # touch 保留断点续跑数据，truncate 在首次运行时创建空文件
-  [ -f "$err_file" ] || : > "$err_file"
-  [ -z "$progress_file" ] || [ -f "$progress_file" ] || : > "$progress_file"
+# 用实际值替换占位符
+sed -i \
+  -e "s|__DOMAIN__|$DOMAIN|" \
+  -e "s|__WORK_ROOT__|$WORK_ROOT|" \
+  -e "s|__SCRIPT_DIR__|$SCRIPT_DIR|" \
+  -e "s|__PORT_RANGE__|$PORT_RANGE|" \
+  -e "s|__PERMUTATION__|$PERMUTATION|" \
+  -e "s|__SCREENSHOT__|$SCREENSHOT|" \
+  "targets/$DOMAIN/runtime/env.sh"
 
-  (
-    timeout --kill-after=30 "$total_timeout" "$@" 2>>"$err_file"
-  ) &
-  local scan_pid=$!
-  echo "$scan_pid" > "$TARGET_DIR/runtime/${tool_name}.pid"
-
-  local last_progress_ts
-  local last_bytes
-  local cur_bytes
-  local now_ts
-  last_progress_ts=$(date +%s)
-  last_bytes=0
-
-  while kill -0 "$scan_pid" 2>/dev/null; do
-    sleep 30
-    cur_bytes=$(( $(wc -c < "$progress_file" 2>/dev/null || echo 0) + $(wc -c < "$err_file" 2>/dev/null || echo 0) ))
-    now_ts=$(date +%s)
-    if [ "$cur_bytes" -gt "$last_bytes" ]; then
-      last_bytes="$cur_bytes"
-      last_progress_ts="$now_ts"
-    elif [ $((now_ts - last_progress_ts)) -ge "$idle_timeout" ]; then
-      echo "⚠️ ${tool_name} ${idle_timeout}s 无进度，终止 PID $scan_pid" | tee -a "$err_file"
-      kill "$scan_pid" 2>/dev/null || true
-      sleep 15
-      # 确认进程仍在才 kill -9，避免误杀 PID 复用
-      if kill -0 "$scan_pid" 2>/dev/null; then
-        kill -9 "$scan_pid" 2>/dev/null || true
-      fi
-      break
-    fi
-  done
-
-  wait "$scan_pid"
-  local scan_rc=$?
-  echo "$scan_rc" > "$TARGET_DIR/runtime/${tool_name}.exitcode"
-  finalize_err_log "$err_file" "$scan_rc"
-  return "$scan_rc"
-}
+# 自检: 能 source 且变量可用
+if ( source "targets/$DOMAIN/runtime/env.sh" && [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ] ); then
+  echo "✅ 已生成并验证 targets/$DOMAIN/runtime/env.sh"
+else
+  echo "❌ env.sh 生成或自检失败，中止"
+  exit 1
+fi
 ```
 
 **MUST 输出 checkpoint**:
@@ -266,6 +313,7 @@ run_with_watchdog() {
 - [ ] 域名变形生成: 是 / 否
 - [ ] Web 截图: 是 / 否
 - [ ] 目录结构已创建
+- [ ] `runtime/env.sh` 已生成并自检通过
 
 **Phase 1 通过即进入 Phase 2，全程自动执行不再询问。**
 
@@ -277,7 +325,7 @@ run_with_watchdog() {
 
 ### 2.1 whois 信息
 ```bash
-run_with_watchdog "whois" 1200 300 \
+wd_run "whois" 1200 300 \
   "targets/$DOMAIN/whois_info/$DOMAIN.html" \
   "targets/$DOMAIN/whois_info/$DOMAIN.err.log" -- \
   wget --timeout=30 "https://whois.aite.xyz/?ajax&domain=$DOMAIN" -O "targets/$DOMAIN"/whois_info/"$DOMAIN".html -nv
@@ -285,7 +333,7 @@ run_with_watchdog "whois" 1200 300 \
 
 ### 2.2 OneForAll
 ```bash
-run_with_watchdog "oneforall" 1200 300 \
+wd_run "oneforall" 1200 300 \
   "targets/$DOMAIN/oneforall_subdomains/$DOMAIN.csv" \
   "targets/$DOMAIN/oneforall_subdomains/oneforall.err.log" -- \
   python3 /opt/OneForAll/oneforall.py --target "$DOMAIN" --path="targets/$DOMAIN/oneforall_subdomains/" --req False run
@@ -339,7 +387,7 @@ if [ -f "$SCRIPT_DIR/ksubdomain.yaml" ]; then
 elif [ -f "$KSUB_WORKDIR/ksubdomain.yaml" ]; then
   echo "ℹ️ 复用已有 $KSUB_WORKDIR/ksubdomain.yaml"
 else
-  run_with_watchdog "ksubdomain_test" 300 120 \
+  wd_run "ksubdomain_test" 300 120 \
     "$KSUB_WORKDIR/ksubdomain.yaml" \
     "$TARGET_DIR/ksubdomain_subdomains/ksubdomain_test.err.log" -- \
     ksubdomain test
@@ -357,7 +405,7 @@ BEFORE=$(safe_line_count "$TARGET_DIR/ksubdomain_subdomains/ksubdomain.txt")
 # ksubdomain 输出含 "域名=>CNAME ...=>IP" 链，用 sed 去掉 => 及之后内容，仅保留纯域名
 # 从每目标独立 workdir 运行，读取 ksubdomain.yaml
 : > "$TARGET_DIR"/ksubdomain_subdomains/ksubdomain_raw.txt
-run_with_watchdog "ksubdomain_enum" 1200 300 \
+wd_run "ksubdomain_enum" 1200 300 \
   "$TARGET_DIR/ksubdomain_subdomains/ksubdomain_raw.txt" \
   "$TARGET_DIR/ksubdomain_subdomains/ksubdomain.err.log" -- \
   sh -c 'cd "$4" && ksubdomain e -d "$1" --wild-filter-mode advanced --silent > "$2"' _ "$DOMAIN" "$TARGET_DIR/ksubdomain_subdomains/ksubdomain_raw.txt" "$KSUB_WORKDIR"
@@ -378,7 +426,7 @@ popd >/dev/null
 BEFORE=$(safe_line_count "targets/$DOMAIN/subdomainsbrute_subdomains/subdomainsbrute.txt")
 # subDomainsBrute 依赖 ./dict/ 目录，需在其安装目录下运行；输出用绝对路径
 ORIG_DIR="$(pwd)"
-run_with_watchdog "subdomainsbrute" 1200 300 \
+wd_run "subdomainsbrute" 1200 300 \
   "$ORIG_DIR/targets/$DOMAIN/subdomainsbrute_subdomains/$DOMAIN.txt" \
   "$ORIG_DIR/targets/$DOMAIN/subdomainsbrute_subdomains/subdomainsbrute.err.log" -- \
   bash -lc 'cd /opt/subDomainsBrute && python3 subDomainsBrute.py --full "$0" -t 200 -o "$1"' "$DOMAIN" "$ORIG_DIR/targets/$DOMAIN/subdomainsbrute_subdomains/$DOMAIN.txt"
@@ -396,7 +444,7 @@ fi
 ### 2.5 subfinder
 ```bash
 BEFORE=$(safe_line_count "targets/$DOMAIN/subfinder_subdomains/subfinder.txt")
-run_with_watchdog "subfinder" 1200 300 \
+wd_run "subfinder" 1200 300 \
   "targets/$DOMAIN/subfinder_subdomains/subfinder.txt" \
   "targets/$DOMAIN/subfinder_subdomains/subfinder.err.log" -- \
   subfinder -d "$DOMAIN" -all -o "targets/$DOMAIN"/subfinder_subdomains/subfinder.txt
@@ -411,20 +459,96 @@ fi
 ```
 
 ### 2.6 gau (历史URL提取子域名)
+
+> **⚠️ provider 可达性差异（MUST 预检）**: gau 的 4 个 provider 在不同网络环境下可达性差别极大，
+> 且 gau **没有任何整体超时参数**——单个 provider 卡住会让整条命令挂死。
+>
+> **实测案例**:
+> - `commoncrawl` → HTTP 000（完全不可达）
+> - `wayback` → 单次 CDX 请求 >12s，`--timeout 25` 也救不回来，`--providers wayback` 单独跑 90s 无输出
+> - `otx` / `urlscan` → HTTP 200，快速可靠
+> - 默认全 provider 跑 3.5 分钟 ⇒ **0 条结果**
+>
+> **处置**: 先用 `curl` 探活各 provider，把 gau 拆成**快通道**(otx,urlscan) + **慢通道**(wayback，脱离后台)，
+> 并对 wayback 直接走 CDX API 兜底（绕过 gau，见下方 2.6.2）。
+
+#### 2.6.0 provider 预检
+
+```bash
+set -o pipefail
+for u in "https://web.archive.org/cdx/search/cdx?url=example.com&limit=1" \
+         "http://index.commoncrawl.org/CC-MAIN-2024-10-index?url=example.com&limit=1&output=json" \
+         "https://otx.alienvault.com/api/v1/indicators/domain/example.com/url_list" \
+         "https://urlscan.io/api/v1/search/?q=domain:example.com&size=1"; do
+  host=$(echo "$u" | awk -F/ '{print $3}')
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 12 "$u" 2>/dev/null || echo ERR)
+  echo "  $host -> $code"
+done
+```
+`000/ERR` 的 provider **必须从 `--providers` 中剔除**。
+
+#### 2.6.1 快通道 (otx,urlscan) + 慢通道 (wayback)
+
 ```bash
 BEFORE=$(safe_line_count "targets/$DOMAIN/gau_subdomains/gau.txt")
-: > "targets/$DOMAIN"/gau_subdomains/url_raw.txt
-run_with_watchdog "gau" 1200 300 \
-  "targets/$DOMAIN/gau_subdomains/url_raw.txt" \
-  "targets/$DOMAIN/gau_subdomains/gau.err.log" -- \
-  sh -c 'gau "$1" --subs --blacklist eot,jpg,jpeg,gif,css,tif,tiff,png,ttf,otf,woff,woff2,ico,svg,zip,rar,tar.gz,tgz,tar.bz2,tar,jar,war,7z,bak,sql,gz,sql.gz,tar.tgz --threads 50 > "$2"' _ "$DOMAIN" "targets/$DOMAIN/gau_subdomains/url_raw.txt"
-cat "targets/$DOMAIN"/gau_subdomains/url_raw.txt | anew "targets/$DOMAIN"/gau_subdomains/url.txt
+
+GAU_BLACKLIST='eot,jpg,jpeg,gif,css,tif,tiff,png,ttf,otf,woff,woff2,ico,svg,zip,rar,tar.gz,tgz,tar.bz2,tar,jar,war,7z,bak,sql,gz,sql.gz,tar.tgz'
+
+# ── 快通道: 只跑可达且快速的 provider ──
+: > "targets/$DOMAIN"/gau_subdomains/url_raw_fast.txt
+wd_start "gau_fast" 900 240 \
+  "targets/$DOMAIN/gau_subdomains/url_raw_fast.txt" \
+  "targets/$DOMAIN/gau_subdomains/gau_fast.err.log" -- \
+  sh -c 'gau "$1" --subs --providers otx,urlscan --timeout 20 --retries 1 --threads 20 \
+    --blacklist "$3" > "$2"' _ "$DOMAIN" "targets/$DOMAIN/gau_subdomains/url_raw_fast.txt" "$GAU_BLACKLIST"
+wd_wait gau_fast 420
+
+# ── 慢通道: wayback 脱离后台, 有结果就收, 无结果不阻塞主流程 ──
+: > "targets/$DOMAIN"/gau_subdomains/url_raw_wayback.txt
+wd_start "gau_wayback" 1800 420 \
+  "targets/$DOMAIN/gau_subdomains/url_raw_wayback.txt" \
+  "targets/$DOMAIN/gau_subdomains/gau_wayback.err.log" -- \
+  sh -c 'gau "$1" --subs --providers wayback --timeout 30 --retries 0 --threads 5 \
+    --blacklist "$3" > "$2"' _ "$DOMAIN" "targets/$DOMAIN/gau_subdomains/url_raw_wayback.txt" "$GAU_BLACKLIST"
+```
+
+#### 2.6.2 wayback CDX API 兜底（关键 —— 收益最大的一步）
+
+> gau 的 wayback provider 常常拿不到数据，但**直连 CDX API 是通的**。
+> 实测：gau wayback 通道 0 条，而 CDX API 直连一次拿到 **20000 条 URL(3.3MB)**。
+> `limit` 给足（建议 20000+），并注意它会**打满 limit 就截断**——想拿全需分页。
+
+```bash
+set -o pipefail
+timeout 90 curl -s --max-time 85 -G "https://web.archive.org/cdx/search/cdx" \
+  --data-urlencode "url=*.$DOMAIN" \
+  --data-urlencode "fl=original" \
+  --data-urlencode "collapse=urlkey" \
+  --data-urlencode "limit=20000" \
+  --data-urlencode "filter=statuscode:200" \
+  -o "targets/$DOMAIN/gau_subdomains/wayback_cdx_raw.txt" 2>/dev/null
+echo "CDX: $(wc -l < targets/$DOMAIN/gau_subdomains/wayback_cdx_raw.txt 2>/dev/null || echo 0) 条"
+```
+
+#### 2.6.3 合并与子域名提取
+
+```bash
+set -o pipefail
+
+# 三路合并 (anew 会把新增行打到 stdout, 必须 >/dev/null, 否则刷屏淹没 AI 上下文)
+cat "targets/$DOMAIN"/gau_subdomains/url_raw_fast.txt \
+    "targets/$DOMAIN"/gau_subdomains/url_raw_wayback.txt \
+    "targets/$DOMAIN"/gau_subdomains/wayback_cdx_raw.txt 2>/dev/null | \
+  tr -d '\r' | sed '/^$/d' | anew "targets/$DOMAIN"/gau_subdomains/url_raw.txt >/dev/null
+
+cat "targets/$DOMAIN"/gau_subdomains/url_raw.txt | \
+  anew "targets/$DOMAIN"/gau_subdomains/url.txt >/dev/null
+
+# URL → 主机名 → dnsx 解析
 : > "targets/$DOMAIN"/gau_subdomains/gau_raw.txt
-run_with_watchdog "gau_dnsx" 1200 300 \
-  "targets/$DOMAIN/gau_subdomains/gau_raw.txt" \
-  "targets/$DOMAIN/gau_subdomains/gau_dnsx.err.log" -- \
-  sh -c 'cat "$1" | awk -F "/" "{print \$3}" | awk -F ":" "{print \$1}" | sort | uniq | dnsx > "$2"' _ "targets/$DOMAIN/gau_subdomains/url.txt" "targets/$DOMAIN/gau_subdomains/gau_raw.txt"
-cat "targets/$DOMAIN"/gau_subdomains/gau_raw.txt | anew "targets/$DOMAIN"/gau_subdomains/gau.txt
+cat "targets/$DOMAIN"/gau_subdomains/url.txt | awk -F "/" '{print $3}' | awk -F ":" '{print $1}' | \
+  sort -u | dnsx -silent 2>/dev/null | anew "targets/$DOMAIN"/gau_subdomains/gau_raw.txt >/dev/null
+cat "targets/$DOMAIN"/gau_subdomains/gau_raw.txt | anew "targets/$DOMAIN"/gau_subdomains/gau.txt >/dev/null
 AFTER=$(safe_line_count "targets/$DOMAIN/gau_subdomains/gau.txt")
 NEW=$((AFTER - BEFORE))
 echo "gau: $AFTER 条 (本次新增 $NEW)"
@@ -443,7 +567,7 @@ cat "targets/$DOMAIN"/oneforall_subdomains/oneforall.txt \
     "targets/$DOMAIN"/subfinder_subdomains/subfinder.txt \
     "targets/$DOMAIN"/gau_subdomains/gau.txt | sort | uniq > "targets/$DOMAIN"/jsubfinder_subdomains/jsubfinder_input.txt
 : > "targets/$DOMAIN"/jsubfinder_subdomains/jsubfinder_raw.txt
-run_with_watchdog "jsubfinder" 1200 300 \
+wd_run "jsubfinder" 1200 300 \
   "targets/$DOMAIN/jsubfinder_subdomains/jsubfinder_raw.txt" \
   "targets/$DOMAIN/jsubfinder_subdomains/jsubfinder.err.log" -- \
   sh -c 'cat "$1" | httpx --silent | jsubfinder search | grep -v "GetResults content type JS" | grep -F "$2" > "$3"' _ "targets/$DOMAIN/jsubfinder_subdomains/jsubfinder_input.txt" "$DOMAIN" "targets/$DOMAIN/jsubfinder_subdomains/jsubfinder_raw.txt"
@@ -520,7 +644,7 @@ if [ "$WILDCARD" = false ]; then
       "targets/$DOMAIN"/gau_subdomains/gau.txt \
       "targets/$DOMAIN"/jsubfinder_subdomains/jsubfinder.txt | sort | uniq > "targets/$DOMAIN"/dnsgen_subdomains/dnsgen_input.txt
   : > "targets/$DOMAIN"/dnsgen_subdomains/dnsgen_raw.txt
-  run_with_watchdog "dnsgen" 1200 300 \
+  wd_run "dnsgen" 1200 300 \
     "targets/$DOMAIN/dnsgen_subdomains/dnsgen_raw.txt" \
     "targets/$DOMAIN/dnsgen_subdomains/dnsgen.err.log" -- \
     sh -c 'cat "$1" | dnsgen - | dnsx -silent -a -resp | awk "{print \$1}" > "$2"' _ "targets/$DOMAIN/dnsgen_subdomains/dnsgen_input.txt" "targets/$DOMAIN/dnsgen_subdomains/dnsgen_raw.txt"
@@ -549,7 +673,7 @@ if [ "$WILDCARD" = false ]; then
       "targets/$DOMAIN"/jsubfinder_subdomains/jsubfinder.txt \
       "targets/$DOMAIN"/dnsgen_subdomains/dnsgen.txt | sort | uniq > "targets/$DOMAIN"/alterx_subdomains/alterx_input.txt
   : > "targets/$DOMAIN"/alterx_subdomains/alterx_raw.txt
-  run_with_watchdog "alterx" 1200 300 \
+  wd_run "alterx" 1200 300 \
     "targets/$DOMAIN/alterx_subdomains/alterx_raw.txt" \
     "targets/$DOMAIN/alterx_subdomains/alterx.err.log" -- \
     sh -c 'cat "$1" | alterx | dnsx -silent -a -resp | awk "{print \$1}" > "$2"' _ "targets/$DOMAIN/alterx_subdomains/alterx_input.txt" "targets/$DOMAIN/alterx_subdomains/alterx_raw.txt"
@@ -584,7 +708,7 @@ cat "targets/$DOMAIN"/oneforall_subdomains/oneforall.txt \
 ```bash
 # 子域名→IP 映射 (直写文件 + 后处理，防止管道中断丢失)
 echo "  正在 dnsx 解析 $(cat targets/$DOMAIN/collect_subdomains/collect_subdomains.txt 2>/dev/null | wc -l) 个子域名 ..."
-run_with_watchdog "dnsx_collect" 1200 300 \
+wd_run "dnsx_collect" 1200 300 \
   "targets/$DOMAIN/active_subdomains/active_subdomains2ips_raw.txt" \
   "targets/$DOMAIN/active_subdomains/dnsx_collect.err.log" -- \
   dnsx -l "targets/$DOMAIN"/collect_subdomains/collect_subdomains.txt -silent -a -resp -nc -t 200 -timeout 2 -retry 1 -o "targets/$DOMAIN"/active_subdomains/active_subdomains2ips_raw.txt
@@ -690,26 +814,66 @@ case "$PORT_RANGE" in
   *)         PORT_ARG="-top-ports 1000" ;;  # 默认
 esac
 
+# ── SYN 扫描降级（MUST）──
+# SYN 扫描需要 root + 原始套接字权限。非 root 时 naabu 会直接失败，
+# 必须显式降级为 TCP Connect，而不是让整轮重试白跑 3 次。
+# 判定方式: 实际尝试一次权限探测，不靠"看起来是 root"猜测。
+if [ "$(id -u)" -eq 0 ]; then
+  SCAN_TYPE="s"
+else
+  SCAN_TYPE="c"
+  echo "⚠️ 非 root 环境，端口扫描降级为 TCP Connect (-scan-type c)：速度较慢但无需原始套接字"
+fi
+
 # 带重试的端口扫描
+# 判据以 naabu 退出码为准，不能用行数：目标真实无开放端口时 0 行是正确结果，
+# 按行数判定会把它当成失败而白扫 3 遍。
+scan_attempt=0
 for attempt in 1 2 3; do
-  echo "[端口扫描 尝试 $attempt/3]"
+  echo "[端口扫描 尝试 $attempt/3] (scan-type=$SCAN_TYPE)"
   : > "targets/$DOMAIN"/active_ports/active_ports_raw.txt
-  run_with_watchdog "naabu" 7200 900 \
+  wd_run "naabu" 7200 900 \
     "targets/$DOMAIN/active_ports/active_ports_raw.txt" \
     "targets/$DOMAIN/active_ports/naabu_err.log" -- \
-    naabu -l "targets/$DOMAIN"/active_all/active_all.txt -exclude-cdn -Pn -scan-type s -iv 4 \
+    naabu -l "targets/$DOMAIN"/active_all/active_all.txt -exclude-cdn -Pn -scan-type "$SCAN_TYPE" -iv 4 \
       -c 50 -pts 50 -rate 10000 $PORT_ARG -o "targets/$DOMAIN"/active_ports/active_ports_raw.txt
+  scan_rc=$?
+
+  # SYN 失败时自动降一级重试一次（权限判定可能与实际不符，如容器内 CAP_NET_RAW 受限）
+  if [ "$scan_rc" -ne 0 ] && [ "$SCAN_TYPE" = "s" ] && [ "$attempt" -eq 1 ]; then
+    if grep -qiE 'permission|operation not permitted|root' "targets/$DOMAIN"/active_ports/naabu_err.log 2>/dev/null; then
+      echo "⚠️ SYN 扫描报权限错误，降级为 TCP Connect 重试"
+      SCAN_TYPE="c"
+      continue
+    fi
+  fi
   cat "targets/$DOMAIN"/active_ports/active_ports_raw.txt | \
     anew "targets/$DOMAIN"/active_ports/active_ports.txt
 
-  if [ $(wc -l < "targets/$DOMAIN"/active_ports/active_ports.txt) -gt 0 ]; then
+  if [ "$scan_rc" -eq 0 ]; then
     echo "✅ 端口扫描完成: $(wc -l < "targets/$DOMAIN"/active_ports/active_ports.txt) 个开放端口"
     break
-  else
-    echo "⚠️ 端口扫描无结果，等待重试..."
-    sleep $((2 ** attempt))  # 2s / 4s / 8s 递增
   fi
+
+  # 扫描本身失败（rc≠0），但已落盘部分结果时不必整轮重扫（anew 会自然补齐）
+  if [ -s "targets/$DOMAIN"/active_ports/active_ports.txt ]; then
+    echo "⚠️ naabu 退出码 $scan_rc，但已有 $(wc -l < "targets/$DOMAIN"/active_ports/active_ports.txt) 条结果，保留并继续"
+    break
+  fi
+
+  scan_attempt=$attempt
+  echo "⚠️ 端口扫描失败 (rc=$scan_rc)，等待重试..."
+  # 扫描类工具重试间隔取 30s/60s/120s（与全局规则 6 一致）：
+  # 资源密集型扫描失败往往是因为本机/链路被占满，短间隔重试只会再撞一次
+  case $attempt in
+    1) sleep 30 ;;
+    2) sleep 60 ;;
+    3) sleep 120 ;;
+  esac
 done
+if [ "$scan_attempt" -eq 3 ]; then
+  echo "❌ 端口扫描 3 次均失败，继续后续阶段（可能有部分结果）"
+fi
 ```
 
 **MUST 输出 checkpoint**:
@@ -736,28 +900,35 @@ targets/$DOMAIN/active_ports/active_ports.txt
 ```bash
 # 第一遍 httpx：过滤可访问 HTTP 目标
 : > "targets/$DOMAIN"/active_webs/httpx_alive_raw.txt
-run_with_watchdog "httpx_alive" 3600 600 \
+wd_run "httpx_alive" 3600 600 \
   "targets/$DOMAIN/active_webs/httpx_alive_raw.txt" \
   "targets/$DOMAIN/active_webs/httpx_alive.err.log" -- \
   sh -c 'httpx -l "$1" -silent | sort | uniq > "$2"' _ "targets/$DOMAIN/active_ports/active_ports.txt" "targets/$DOMAIN/active_webs/httpx_alive_raw.txt"
 
 # 兜底探测: 解析成功但 naabu 未返回端口的域名，用 httpx 补扫默认 80/443
 # 防止把只有标准端口 Web 服务的站点误判为"无服务"
+#
+# ⚠️ 判定依据必须是「该域名解析出的 IP」是否出现在 active_ports.txt 中。
+#    active_ports.txt 存的是 IP:port（naabu 输出），里面没有域名，
+#    所以用域名去做 grep 永远匹配不上，会导致**每个域名都被判为"未覆盖"**，
+#    兜底探测退化成对全部子域名的二次全量 httpx。
 FALLBACK_INPUT="targets/$DOMAIN/active_webs/httpx_fallback_input.txt"
+SUBDOMAIN_IP_MAP="targets/$DOMAIN/active_subdomains/active_subdomains2ips.txt"
 : > "$FALLBACK_INPUT"
-if [ -s "targets/$DOMAIN/active_subdomains/active_subdomains.txt" ]; then
-  # 提取 active_subdomains 中有 DNS 解析但未出现在 active_ports 中的域名
-  cat "targets/$DOMAIN/active_subdomains/active_subdomains.txt" | while read -r domain; do
-    if ! grep -qF "$domain" "targets/$DOMAIN/active_ports/active_ports.txt" 2>/dev/null; then
+if [ -s "targets/$DOMAIN/active_subdomains/active_subdomains.txt" ] && [ -s "$SUBDOMAIN_IP_MAP" ]; then
+  while read -r domain; do
+    ip=$(awk -v d="$domain" '$1 == d {print $2; exit}' "$SUBDOMAIN_IP_MAP")
+    # 尾部冒号作分隔符，避免 1.2.3.4 误匹配 1.2.3.45
+    if [ -n "$ip" ] && ! grep -qF "$ip:" "targets/$DOMAIN/active_ports/active_ports.txt" 2>/dev/null; then
       echo "http://$domain" >> "$FALLBACK_INPUT"
       echo "https://$domain" >> "$FALLBACK_INPUT"
     fi
-  done
+  done < "targets/$DOMAIN/active_subdomains/active_subdomains.txt"
 fi
 if [ -s "$FALLBACK_INPUT" ]; then
   FALLBACK_COUNT=$(wc -l < "$FALLBACK_INPUT")
   echo "🔍 httpx 兜底探测: $FALLBACK_COUNT 个候选 URL (DNS 已解析但端口扫描未覆盖)"
-  run_with_watchdog "httpx_fallback" 3600 600 \
+  wd_run "httpx_fallback" 3600 600 \
     "targets/$DOMAIN/active_webs/httpx_fallback_raw.txt" \
     "targets/$DOMAIN/active_webs/httpx_fallback.err.log" -- \
     sh -c 'httpx -l "$1" -silent | sort | uniq > "$2"' _ "$FALLBACK_INPUT" "targets/$DOMAIN/active_webs/httpx_fallback_raw.txt"
@@ -770,7 +941,7 @@ else
 fi
 
 # 第二遍 httpx：采集 JSON 指纹
-run_with_watchdog "httpx_fingerprint" 3600 600 \
+wd_run "httpx_fingerprint" 3600 600 \
   "targets/$DOMAIN/active_webs/active_websfinger.json" \
   "targets/$DOMAIN/active_webs/httpx_fingerprint.err.log" -- \
   httpx -l "targets/$DOMAIN"/active_webs/httpx_alive_raw.txt \
@@ -807,7 +978,7 @@ if [ "$SCREENSHOT" = "yes" ] || [ "$SCREENSHOT" = "y" ]; then
     pushd "$TARGET_DIR" >/dev/null
     # gowitness --write-db 默认在 CWD 生成 gowitness.sqlite3
     # watchdog 监控 CWD 下的文件（运行时真正在被写入的文件）
-    run_with_watchdog "gowitness" 7200 600 \
+    wd_run "gowitness" 7200 600 \
       "./gowitness.sqlite3" \
       "$TARGET_DIR/web_screenshots/gowitness.err.log" -- \
       gowitness scan file -f "$TARGET_DIR"/active_webs/active_webs.txt \
@@ -824,7 +995,12 @@ if [ "$SCREENSHOT" = "yes" ] || [ "$SCREENSHOT" = "y" ]; then
       break
     else
       echo "⚠️ 截图失败或无结果，等待重试..."
-      sleep $((2 ** attempt))
+      # 截图属资源密集型，重试间隔 30s/60s/120s（与全局规则 6 一致）
+      case $attempt in
+        1) sleep 30 ;;
+        2) sleep 60 ;;
+        3) sleep 120 ;;
+      esac
     fi
   done
 else
@@ -854,6 +1030,137 @@ targets/$DOMAIN/web_screenshots/screenshots/*.png
 **目的**:多引擎漏洞检测。
 
 ⚠️ **串行执行硬规则**: 6 个扫描模块**必须逐个串行执行**，上一模块完全结束后才能开始下一模块。禁止并行启动多个扫描——每个模块都是资源密集型（CPU/内存/带宽），并行会互相抢占导致超时、误报、漏报。AI 必须等待每个命令块完整返回后再执行下一个，不准批量提交。
+
+### 6.0 规模守卫（Scale Guard）
+
+> **两条规则，按预计耗时二选一：**
+>
+> | 预计耗时 | 采用规则 |
+> |---------|---------|
+> | **≤ 24 小时** | **全量覆盖扫描**（默认） |
+> | **> 24 小时** | **优化规则扫描**（即 6.0.3 分级） |
+>
+> **设计意图**: ≤24h 的代价是可接受的，那就保证**覆盖完整**、不留扫描盲区；
+> 超过 24h 则实际不可完成，此时**优先保证能出结果**，用分级换取可行性。
+>
+> **实测案例**: 1848 个 Web 目标 × 1496 个 high/critical POC = 276 万 task，
+> 1 核机器上 afrog 实测 4.3 task/s ⇒ **约 179 小时（> 24h）⇒ 触发优化规则**。
+
+#### 6.0.1 启动前必须计算
+
+```bash
+set -o pipefail
+
+TARGET_N=$(wc -l < "targets/$DOMAIN"/active_webs/active_webs.txt)
+# 超过此阈值则从"全量覆盖"切换到"优化规则"
+THRESHOLD_S=${SCALE_THRESHOLD_S:-86400}   # 24 小时
+
+echo "目标数: $TARGET_N  全量/优化 切换阈值: $((THRESHOLD_S/3600)) 小时"
+```
+
+#### 6.0.2 吞吐实测（MUST — 不得凭经验估算）
+
+对重型引擎（afrog / nuclei / dirsearch）**必须先做小样本实测**，再外推：
+
+```bash
+# 取前 20 个目标做实测, 记录 task 速率
+head -20 "targets/$DOMAIN"/active_webs/active_webs.txt > /tmp/scale_probe_$$.txt
+# 启动引擎, 等 60s, 从进度输出解析 (n/total) 得到速率
+# 实测吞吐 R (task/s) ⇒ 预计总耗时 = TARGET_N × POC / R
+```
+
+**注意**: 吞吐会随目标集成分剧烈变化。实测发现——
+同样 1496 个 POC，混合了 403/302 的 500 目标集只有 **4.3 task/s**，
+而纯 200 响应的 15 目标集达到 **35 task/s**（8 倍差距）。
+因为大量 403/302 目标每个都要等连接超时。**不要用全量目标的速率去外推子集**。
+
+**决策与上报**（必须输出，然后按结论执行）:
+
+```
+📊 规模评估
+   目标数: N
+   实测吞吐: R task/s
+   预计耗时: X 小时
+```
+
+- `预计耗时 ≤ 24h` ⇒ 输出 **`✅ 采用【全量覆盖】规则`**，对全部目标执行
+- `预计耗时 > 24h` ⇒ 输出 **`⚠️ 超过 24h，采用【优化规则】扫描`**，进入 6.0.3 分级
+
+> 两个规则都可被用户覆盖：用户明确说"不管多久都要全量"⇒ 全量；
+> 用户明确说"启用分级"⇒ 立即分级，无需等超时。
+
+#### 6.0.3 优化规则：分级扫描
+
+> **触发条件**（满足其一即可）:
+> 1. 6.0.2 实测 **预计耗时 > 24 小时**（自动触发）
+> 2. 用户**显式**要求："启用分级" / "按优先级扫" / "只扫高价值" / "时间有限，分级扫"
+>
+> 预计耗时 ≤ 24h 时**不得**启用分级——代价可接受时优先保证覆盖完整。
+
+按**响应质量**分级：
+
+| Tier | 判定条件（源自 `active_websfinger.json`） | 引擎覆盖 |
+|------|------------------------------------------|---------|
+| **A** | `status_code == 200` 且 `title` 命中高价值正则 | afrog + nuclei + dirsearch **全量** |
+| **B** | `status_code == 200` 且不在 A | nuclei + backup（跳过最重的 dirsearch/afrog） |
+| **C** | 其余（403/302/404/5xx 等） | 仅 backup 扫描；不跑重型引擎 |
+
+高价值正则（与 5.1 智能分类保持一致）:
+```
+admin|管理|后台|登录|login|dashboard|console|\bapi\b|swagger|system|platform|运营|网关|监控|signin
+```
+
+生成分级清单:
+
+```bash
+set -o pipefail
+
+# Tier A/B 从指纹 JSON 生成；Tier C = active_webs.txt 减去 A/B
+python3 - <<'PY' "$TARGET_DIR"
+import json, re, sys
+base = sys.argv[1]
+kw = re.compile(r'admin|管理|后台|登录|login|dashboard|console|\bapi\b|swagger|system|platform|运营|网关|监控|signin', re.I)
+A, B, seen = [], [], set()
+with open(f"{base}/active_webs/active_websfinger.json") as f:
+    for line in f:
+        line = line.strip()
+        if not line: continue
+        try: r = json.loads(line)
+        except: continue
+        url, sc, title = r.get('url'), r.get('status_code'), r.get('title')
+        if not url or url in seen: continue      # MUST 按 url 去重, 否则 tiers 互相重叠
+        seen.add(url)
+        if sc == 200:
+            (A if (title and kw.search(title)) else B).append(url)
+with open(f"{base}/active_webs/tier_a_highvalue.txt", "w") as f: f.write("\n".join(A) + "\n")
+with open(f"{base}/active_webs/tier_b_200.txt", "w") as f: f.write("\n".join(B) + "\n")
+print(f"Tier A={len(A)} Tier B={len(B)}")
+PY
+
+# Tier C = 全量 - A - B
+cat "$TARGET_DIR"/active_webs/tier_a_highvalue.txt "$TARGET_DIR"/active_webs/tier_b_200.txt 2>/dev/null | \
+  sort -u > /tmp/_ab_$$.txt
+grep -vxF -f /tmp/_ab_$$.txt "$TARGET_DIR"/active_webs/active_webs.txt > "$TARGET_DIR"/active_webs/tier_c_other.txt 2>/dev/null || true
+rm -f /tmp/_ab_$$.txt
+```
+
+#### 6.0.4 硬性约束
+
+- **阈值 24 小时是唯一自动切换条件。**
+  `预计耗时 ≤ 24h` ⇒ 必须全量覆盖，**不得**提前启用分级；
+  `预计耗时 > 24h` ⇒ 必须切优化规则，**不得**硬跑全量
+- 切换必须基于 **6.0.2 的实测吞吐**，不得用经验值或猜测值代替
+- 无论走哪条规则，**必须先输出 6.0.2 的规模评估与采用的是哪条规则**
+- 分级只允许缩小重型引擎的目标集，**不得**改变 Phase 1 已确认的
+  端口范围 / 变形开关 / 截图开关
+- 一旦启用分级，**必须在 Phase 6 checkpoint 和最终报告中显式记录**：
+  触发原因（超时/用户要求）、分级规则、各 Tier 数量、实测吞吐、被降级/跳过的目标数
+- 分级时必须写清**覆盖边界**（"Tier C 的 N 个目标未做深度扫描"），
+  不得让读者误以为已全量覆盖
+- 用户可覆盖两条规则：明确要求"不管多久都全量" ⇒ 全量；
+  明确要求"启用分级" ⇒ 立即分级，不受 24h 阈值限制
+- 全量扫描可能持续接近 24h，此时必须保证断点续跑能力（`anew` + `runtime/` 状态文件），
+  并定期向用户汇报进度
 
 ⚠️ **防管道阻塞硬规则**: 漏洞扫描工具输出量大、运行时间长，必须防止管道缓冲区满导致进程卡死：
 - 工具自身的 `-o` / `--json` / `--output` 参数直写文件，不经过管道
@@ -885,7 +1192,7 @@ else
 
   # Web 端口指纹
   if [ -s "targets/$DOMAIN"/active_ports/active_webs_ports.txt ]; then
-    run_with_watchdog "kscan_web" 7200 900 \
+    wd_run "kscan_web" 7200 900 \
       "targets/$DOMAIN/active_ports/active_webs_portsfinger.txt" \
       "targets/$DOMAIN/active_ports/kscan_webs_err.log" -- \
       kscan -t "targets/$DOMAIN"/active_ports/active_webs_ports.txt --check -Pn -Cn -Dn --threads 50 \
@@ -896,7 +1203,7 @@ else
 
   # IP 端口指纹 + Hydra 弱口令
   if [ -s "targets/$DOMAIN"/active_ports/active_ips_ports.txt ]; then
-    run_with_watchdog "kscan_ip" 7200 900 \
+    wd_run "kscan_ip" 7200 900 \
       "targets/$DOMAIN/active_ports/active_ips_portsfinger.txt" \
       "targets/$DOMAIN/active_ports/kscan_ips_err.log" -- \
       kscan -t "targets/$DOMAIN"/active_ports/active_ips_ports.txt --check -Pn -Cn -Dn --threads 50 --hydra \
@@ -929,7 +1236,7 @@ else
   for file in /tmp/afrog_work_$$/part_*; do
     batch_name=$(basename "$file")
     echo "🔍 afrog 批次: $batch_name ($(wc -l < "$file") 目标)"
-    run_with_watchdog "afrog_${batch_name}" 3600 900 \
+    wd_run "afrog_${batch_name}" 3600 900 \
       "targets/$DOMAIN/afrog_scan_results/${batch_name}.json" \
       "targets/$DOMAIN/afrog_scan_results/${batch_name}_err.log" -- \
       afrog -T "$file" -c 50 -rl 100 -S high,critical --task-smart-timeout \
@@ -958,6 +1265,16 @@ fi
 ```
 
 ### 6.3 备份文件扫描
+
+> **⚠️ 软 404 误报（MUST 后处理）**: `ihoneyBakFileScan` 的判定是"该路径返回了非空响应"。
+> 任何配了 catch-all / SPA fallback 的站点，对**任意**路径都返回 200 + 一小段文本，
+> 于是每个字典里的路径都会被判为"命中"。
+>
+> **实测案例**: 某次扫描报出 17 条 `.dump` 命中，全部来自同一个 host，
+> 响应长度整齐都是 21 字节。用随机不存在路径复测，返回**完全相同的 21 字节 200** ⇒ 17 条全是误报。
+>
+> **判据**: 同一 host 上多个命中**响应长度完全一致**，且随机路径也能返回相同响应 ⇒ 软 404，全部剔除。
+
 ```bash
 set -o pipefail
 
@@ -965,7 +1282,7 @@ set -o pipefail
 if [ ! -s "targets/$DOMAIN"/active_webs/active_webs.txt ]; then
   echo "⏭️ 备份扫描: active_webs.txt 为空，跳过"
 else
-  run_with_watchdog "backup_scan" 7200 900 \
+  wd_run "backup_scan" 7200 900 \
     "targets/$DOMAIN/backup_result/backup_scan.txt" \
     "targets/$DOMAIN/backup_result/backup_scan_err.log" -- \
     python3 /opt/ihoneyBakFileScan_Modify/ihoneyBakFileScan_Modify.py \
@@ -974,9 +1291,76 @@ else
 fi
 ```
 
+#### 6.3.1 软 404 基线校验（MUST — 不可跳过）
+
+> 不做这一步，备份扫描的结果基本不可信。对每个命中 host 取一个随机不存在路径做基线，
+> 响应与命中项一致 ⇒ 该 host 的命中全部判为误报。
+
+```bash
+set -o pipefail
+python3 "$SCRIPT_DIR"/references/scripts/soft404_check.py \
+  "targets/$DOMAIN"/backup_result/backup_scan.txt \
+  --out-dir "targets/$DOMAIN"/backup_result
+```
+
+产物（三分类，**报告只能引用 clean**）:
+| 文件 | 含义 | 报告处理 |
+|------|------|---------|
+| `backup_scan_clean.txt` | 通过全部判据的真实命中 | ✅ 可写入报告 |
+| `backup_scan_soft404.txt` | 判定为软 404 | ❌ 禁止写入报告 |
+| `backup_scan_unverified.txt` | 基线或命中项请求失败，**无法判定** | ⚠️ 必须人工确认后才可写入 |
+
+**实现要点（与 6.4.1 的 dirsearch 过滤必须一致）**:
+- **基线与命中项都必须重试 3 次**。目标站常对扫描返回 RST/`000`，
+  单次采样失败若默认判 clean，真软404 会漏进报告
+- **基线一致单条即定案**，不要要求"多条理由同时成立"
+- **取不到基线 ⇒ unverified，绝不允许默认判 clean**（最危险的默认值）
+
+> 报告与 AI 研判（7.2）只能引用 `backup_scan_clean.txt`，禁止直接引用 raw 文件，
+> 否则会把软 404 误报当成高危漏洞写进报告。
+
 ### 6.4 目录/文件爆破
 
 > auto_dirsearch.py 输出到 CWD 下的 `dirsearch_result/`，需先 cd 到域名目录。
+>
+> **⚠️ 结果必须过软 404 过滤（MUST，见 6.4.1）**: 否则 SPA 站点会把**每个**字典路径都报成命中。
+
+#### 6.4.1 dirsearch 软 404 过滤（MUST — 不可跳过）
+
+> **为什么必须做**: dirsearch 判定命中的依据是"路径返回 200"。
+> 配了 SPA fallback / catch-all 的站点对**任意路径**都返回 index.html + 200，
+> 于是字典里每条路径都"命中"。
+>
+> **实测案例（极具迷惑性）**: 11 个高价值目标全部报 `200 - <N>B - /.env`，
+> 体积从 **882B 到 108539B 不等**。体积不一致会让人以为是真实文件
+> （"每个站的 config 当然不一样"）。实际验证：全部是各站 `index.html`。
+> **如果没做这步过滤，报告里会出现 11 条"源码/配置泄露"的高危误报。**
+
+```bash
+set -o pipefail
+python3 "$SCRIPT_DIR"/references/scripts/dirsearch_filter.py \
+  "targets/$DOMAIN"/dirsearch_result --out-dir "targets/$DOMAIN"/dirsearch_result
+```
+
+产物（三分类，**报告只能引用 clean**）:
+| 文件 | 含义 | 报告处理 |
+|------|------|---------|
+| `dirsearch_clean.txt` | 通过全部判据的真实命中 | ✅ 可写入报告 |
+| `dirsearch_soft404.txt` | 判定为软 404 | ❌ 禁止写入报告 |
+| `dirsearch_unverified.txt` | 基线或命中项请求失败，**无法判定** | ⚠️ 必须人工确认后才可写入 |
+
+**判定逻辑（两条决定性判据，任一成立即软404）**:
+1. **基线一致**: 随机不存在路径返回相同 status 且相同长度 ⇒ catch-all 路由
+2. **语义矛盾**: 数据文件路径（`.env`/`.git`/`.sql`/`.zip`…）却返回 `text/html` 的 HTML 文档
+   —— 真实配置文件绝不可能是 HTML
+
+**实现要点（踩坑记录）**:
+- **基线和命中项都必须重试（各 3 次）**。目标站常对扫描返回 RST/000，
+  单次采样失败若默认判 clean，真软404 会漏进报告（实测 kdj.kuaishou.com 反复无常）
+- **判据 1 单独成立即可定案**，不要要求"多条理由同时成立"。
+  有的站 index.html 是 JS 壳、body 前 200 字节内没有 `<!DOCTYPE html>`，
+  多条件与逻辑会把它误判为真实命中
+- 判据 2 **不依赖基线**，因此对响应不稳定的站点依然有效
 
 ```bash
 set -o pipefail
@@ -988,7 +1372,7 @@ else
   if pushd "$TARGET_DIR" >/dev/null; then
     if [ -f "active_webs/active_webs.txt" ]; then
       : > "dirsearch_result/dirsearch_progress.log"
-      run_with_watchdog "dirsearch" 7200 900 \
+      wd_run "dirsearch" 7200 900 \
         "$TARGET_DIR/dirsearch_result/dirsearch_progress.log" \
         "$TARGET_DIR/dirsearch_result/dirsearch.err.log" -- \
         sh -c 'python3 "$1" active_webs/active_webs.txt && find dirsearch_result -maxdepth 1 -type f -name "smart_scan_*.txt" -exec cat {} + > dirsearch_result/dirsearch_progress.log' _ "$SCRIPT_DIR/references/scripts/auto_dirsearch.py"
@@ -1012,7 +1396,7 @@ if [ ! -s "targets/$DOMAIN"/active_webs/active_webs.txt ]; then
   echo "⏭️ Nuclei 模板扫描: active_webs.txt 为空，跳过"
 else
   : > "targets/$DOMAIN"/nuclei_fuzzing_result/nuclei-templates_raw.txt
-  run_with_watchdog "nuclei_templates" 7200 1200 \
+  wd_run "nuclei_templates" 7200 1200 \
     "targets/$DOMAIN/nuclei_fuzzing_result/nuclei-templates_raw.txt" \
     "targets/$DOMAIN/nuclei_fuzzing_result/nuclei-templates_err.log" -- \
     nuclei -t ~/nuclei-templates/ -severity critical,high,medium \
@@ -1083,7 +1467,7 @@ else
       KATANA_TOTAL=1200; KATANA_IDLE=600
     fi
 
-    run_with_watchdog "katana_${KATANA_MODE}" "$KATANA_TOTAL" "$KATANA_IDLE" \
+    wd_run "katana_${KATANA_MODE}" "$KATANA_TOTAL" "$KATANA_IDLE" \
       "targets/$DOMAIN/nuclei_fuzzing_result/katana_urls_raw.txt" \
       "targets/$DOMAIN/nuclei_fuzzing_result/katana_${KATANA_MODE}.err.log" -- \
       sh -c 'TMPDIR="$4" katana -list "$1" $2 -no-sandbox -nc -d 5 -output-template "{{url}}" -silent -fs rdn -rl 50 -dr > "$3"' _ "targets/$DOMAIN/active_webs/active_webs.txt" "$HEADLESS_FLAG" "targets/$DOMAIN/nuclei_fuzzing_result/katana_urls_raw.txt" "targets/$DOMAIN/runtime/katana_tmp"
@@ -1125,7 +1509,7 @@ else
       echo "⏭️ Nuclei DAST: uro_urls 为空，跳过"
     else
       : > "targets/$DOMAIN"/nuclei_fuzzing_result/nuclei-DAST_raw.txt
-      run_with_watchdog "nuclei_dast" 7200 1200 \
+      wd_run "nuclei_dast" 7200 1200 \
         "targets/$DOMAIN/nuclei_fuzzing_result/nuclei-DAST_raw.txt" \
         "targets/$DOMAIN/nuclei_fuzzing_result/nuclei-DAST_err.log" -- \
         nuclei -l "targets/$DOMAIN"/nuclei_fuzzing_result/uro_urls.txt \
@@ -1208,7 +1592,7 @@ echo "──────────── 漏洞发现 ────────
 printf "  %-45s %s 条\n" "nuclei" "$(wc -l < "targets/$DOMAIN"/nuclei_fuzzing_result/nuclei-templates_fuzzing.txt 2>/dev/null || echo 0)"
 printf "  %-45s %s 条\n" "nuclei_DAST" "$(wc -l < "targets/$DOMAIN"/nuclei_fuzzing_result/nuclei-DAST_fuzzing.txt 2>/dev/null || echo 0)"
 printf "  %-45s %s 条\n" "afrog" "$(find "targets/$DOMAIN"/afrog_scan_results/ -name "*.json" -exec cat {} + 2>/dev/null | jq -s 'map(length) | add' 2>/dev/null || echo 0)"
-printf "  %-45s %s 条\n" "backup_scan" "$(wc -l < "targets/$DOMAIN"/backup_result/backup_scan.txt 2>/dev/null || echo 0)"
+printf "  %-45s %s 条\n" "backup_scan(clean)" "$(wc -l < "targets/$DOMAIN"/backup_result/backup_scan_clean.txt 2>/dev/null || echo 0)"
 printf "  %-45s %s 条\n" "kscan_web_finger" "$(wc -l < "targets/$DOMAIN"/active_ports/active_webs_portsfinger.txt 2>/dev/null || echo 0)"
 printf "  %-45s %s 条\n" "kscan_ip_brute" "$(wc -l < "targets/$DOMAIN"/active_ports/active_ips_portsfinger.txt 2>/dev/null || echo 0)"
 # 弱口令成功提取 (grep 可能无匹配，pipefail 下临时关闭)
@@ -1217,7 +1601,7 @@ grep 'Success' "targets/$DOMAIN"/active_ports/active_ips_portsfinger.txt 2>/dev/
 set -o pipefail
 printf "  %-45s %s 条\n" "brute_success" "$(wc -l < "targets/$DOMAIN"/brute_result/brute_success.txt 2>/dev/null || echo 0)"
 # dirsearch 结果统计
-DIRSEARCH_COUNT=$(find "targets/$DOMAIN"/dirsearch_result -maxdepth 1 -type f -name 'smart_scan_*.txt' -exec cat {} + 2>/dev/null | wc -l)
+DIRSEARCH_COUNT=$(wc -l < "targets/$DOMAIN"/dirsearch_result/dirsearch_clean.txt 2>/dev/null || echo 0)
 printf "  %-45s %s 条\n" "dirsearch" "$DIRSEARCH_COUNT"
 echo ""
 echo "──────────── 完整文件索引 ────────────"
@@ -1245,16 +1629,22 @@ AI 必须 Read 以下文件（至少读完，内容多时分批读）：
 | 优先级 | 文件 | 读多少 |
 |--------|------|--------|
 | 🔴 最高 | `brute_result/brute_success.txt` | 全读 |
-| 🔴 最高 | `backup_result/backup_scan.txt` | 全读 |
+| 🔴 最高 | `backup_result/backup_scan_clean.txt` | 全读 |
 | 🔴 最高 | `afrog_scan_results/*.json` | 逐个全读 |
 | 🟡 高 | `nuclei_fuzzing_result/nuclei-templates_fuzzing.txt` | 全读 |
 | 🟡 高 | `nuclei_fuzzing_result/nuclei-DAST_fuzzing.txt` | 全读 |
-| 🟡 高 | `dirsearch_result/smart_scan_*.txt` | 逐个全读 |
+| 🟡 高 | `dirsearch_result/dirsearch_clean.txt` | 全读 |
+| 🟠 待确认 | `backup_result/backup_scan_unverified.txt` | 全读（需人工判定） |
+| 🟠 待确认 | `dirsearch_result/dirsearch_unverified.txt` | 全读（需人工判定） |
 | 🟢 中 | `active_ports/active_webs_portsfinger.txt` | 全读 |
 | 🟢 中 | `active_ports/active_ips_portsfinger.txt` | 全读 |
 | ⚪ 参考 | `active_webs/active_websfinger.json` | 按需 |
 | ⚪ 参考 | `active_webs/high_value_targets.txt` | 全读 |
 | ⚪ 参考 | `active_webs/leak_risks.txt` | 全读 |
+
+> ⚠️ **禁止读 raw**: `backup_scan.txt` 与 `dirsearch_result/smart_scan_*.txt` 是引擎原始输出，
+> **含软404误报**（实测 28 条"高危"全部是误报），**不得进入研判**。
+> 只读 `*_clean.txt`；`*_unverified.txt` 需先人工确认才可采信。
 
 #### Step 2 — 逐条研判
 
@@ -1278,6 +1668,11 @@ AI 必须 Read 以下文件（至少读完，内容多时分批读）：
 ```
 
 **2d. dirsearch 专项研判**:
+
+> ⚠️ **前置条件**: 必须已执行 6.4.1 的软 404 过滤。
+> 研判**只能读 `dirsearch_clean.txt`**；读取 `dirsearch_result/smart_scan_*.txt` 或
+> `dirsearch_progress.log` 会把 SPA fallback 误报当成源码泄露写进报告。
+> `dirsearch_unverified.txt` 中的条目必须先人工验证，不得直接采信。
 
 dirsearch 输出格式: `状态码  路径  大小  跳转URL`，AI 需逐条判断：
 
@@ -1433,6 +1828,11 @@ AI 必须结合**资产特征**和**漏洞类型**，给出具体攻击链，不
 ### 7.3 📄 生成离线 HTML 报告
 
 > 替代 search_server.py，生成一个自包含的 HTML 文件，浏览器直接打开即可，无需 Flask。
+>
+> **⚠️ 前置条件（MUST）**: 必须先完成 6.3.1（备份软404）与 6.4.1（dirsearch 软404）过滤。
+> `generate_report.py` 已改为**优先读 clean 文件**，但若 clean 文件不存在会回退读 raw，
+> 从而把误报当高危漏洞写进报告（实测曾出现"漏洞发现: 17 条"，全是软404误报）。
+> **生成报告后必须核对漏洞数与研判结论一致。**
 
 ```bash
 # 单域名
@@ -1748,7 +2148,7 @@ SQLMAP="/opt/sqlmap/sqlmap.py"
 SQLI_URL="<从 Phase 7 研判提取>"
 
 echo "🔍 sqlmap: $SQLI_URL"
-run_with_watchdog "sqlmap" 1800 300 \
+wd_run "sqlmap" 1800 300 \
   "targets/$DOMAIN/exploit_result/sqlmap_output.txt" \
   "targets/$DOMAIN/exploit_result/sqlmap_err.log" -- \
   python3 "$SQLMAP" -u "$SQLI_URL" --batch --random-agent \
@@ -1763,18 +2163,18 @@ find "targets/$DOMAIN"/exploit_result/sqlmap -name "*.csv" -exec \
 
 ### 8.4 备份/配置泄露利用
 
-**触发**: `backup_result/backup_scan.txt` 非空 或 Phase 7 研判标记 backup / .git / .env leaks。
+**触发**: `backup_result/backup_scan_clean.txt` 非空 或 Phase 7 研判标记 backup / .git / .env leaks。
 
 ```bash
 set -o pipefail
 
-if [ ! -s "targets/$DOMAIN"/backup_result/backup_scan.txt ]; then
-  echo "⏭️ 备份泄露利用: backup_scan.txt 为空，跳过"
+if [ ! -s "targets/$DOMAIN"/backup_result/backup_scan_clean.txt ]; then
+  echo "⏭️ 备份泄露利用: backup_scan_clean.txt 为空，跳过"
 else
   echo "📥 下载泄露文件..."
 
   while IFS= read -r line; do
-    # 从 backup_scan.txt 提取 URL
+    # 从 backup_scan_clean.txt 提取 URL
     LEAK_URL=$(echo "$line" | grep -oE 'https?://[^ ]+' | head -1)
     [ -z "$LEAK_URL" ] && continue
 
@@ -1808,7 +2208,7 @@ else
 
       echo "✅ 下载完成: $LEAK_URL ($(stat -c%s "$DOWNLOAD_FILE" 2>/dev/null || echo 0) bytes)"
     fi
-  done < "targets/$DOMAIN"/backup_result/backup_scan.txt
+  done < "targets/$DOMAIN"/backup_result/backup_scan_clean.txt
 fi
 ```
 
@@ -1900,9 +2300,8 @@ if [ -s "targets/$DOMAIN"/active_webs/high_value_targets.txt ]; then
     anew "targets/$DOMAIN"/exploit_result/login_candidates.txt
 fi
 
-# 从 dirsearch 提取 401/403 管理入口
-find "targets/$DOMAIN"/dirsearch_result -name 'smart_scan_*.txt' -exec \
-  grep -E '40[13]\s' {} \; 2>/dev/null | \
+# 从 dirsearch 提取 401/403 管理入口（只读 clean，禁止读 raw smart_scan_*.txt）
+grep -E '^40[13]' "targets/$DOMAIN"/dirsearch_result/dirsearch_clean.txt 2>/dev/null | \
   grep -iE 'admin|manager|login|console|api' | \
   anew "targets/$DOMAIN"/exploit_result/login_candidates.txt
 
@@ -1999,9 +2398,9 @@ if [ -s "targets/$DOMAIN"/active_webs/active_websfinger.json ]; then
     anew "targets/$DOMAIN"/exploit_result/register_candidates.txt
 fi
 
-# 从 dirsearch 补充
-find "targets/$DOMAIN"/dirsearch_result -name 'smart_scan_*.txt' -exec \
-  grep -iE 'register|signup|join' {} \; 2>/dev/null | \
+# 从 dirsearch 补充（只读 clean，禁止读 raw smart_scan_*.txt）
+grep -iE 'register|signup|join' \
+  "targets/$DOMAIN"/dirsearch_result/dirsearch_clean.txt 2>/dev/null | \
   grep -oE 'https?://[^ ]+' | \
   anew "targets/$DOMAIN"/exploit_result/register_candidates.txt
 

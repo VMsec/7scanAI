@@ -10,7 +10,9 @@
 
 ## naabu 使用原则
 - 当前流程默认 `-Pn`，避免主机探活影响结果
-- 非 root 环境下实际会退为 `CONNECT` 风格，不应把 `SYN` 视为硬前提
+- 非 root 环境下退为 `CONNECT` 风格，不应把 `SYN` 视为硬前提。
+  **该降级已在流程中实现**（见 full-workflow Phase 4.3）：先 `id -u` 判定选 `-scan-type`，
+  SYN 报权限错误时再自动降一级；不要假设 naabu 会自行降级
 - 单次结果偏少时，不直接判定“目标无服务”，后续还有 `httpx` Web 兜底探测
 
 ## CDN / 资产过滤

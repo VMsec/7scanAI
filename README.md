@@ -10,7 +10,7 @@
 - AI 严格按 SKILL.md 中的命令参数和顺序执行，不凭记忆拼命令
 - 每个阶段有明确 checkpoint，通过才进入下一步
 - 扫描前一次性确认（端口范围 + 域名变形 + 截图开关），扫描中零交互
-- 任何步骤失败自动重试 3 次（间隔 2s/4s/8s），anew 保证断点续跑不污染数据
+- 任何步骤失败自动重试 3 次（Phase 2/3 间隔 2s/4s/8s；Phase 4/5/6 间隔 30s/60s/120s），anew 保证断点续跑不污染数据
 - 所有 bash 代码块以 `set -o pipefail` 开头，防止管道中间态错误静默丢失
 - Python 工具 git clone 后**必须** `pip3 install -r requirements.txt --break-system-packages`
 - 默认进入自治执行模式：优先自动修依赖、切 fallback、局部重跑，再决定是否中止
@@ -69,7 +69,7 @@
 **动作**:
 1. 规范化域名（去除 `http://`、`https://`、路径、端口）
 2. 验证 DOMAIN 不含 `../`、`/`、`\`、空格（防路径穿越）
-3. 创建 16 个子目录到 `targets/<domain>/`
+3. 创建 23 个子目录到 `targets/<domain>/`
 
 ---
 
@@ -138,7 +138,7 @@
 [3] 全端口     → naabu -p -             (~60 分钟)
 ```
 - SYN 扫描（需 root），非 root 自动降级 TCP Connect
-- 无结果自动重试 3 次，间隔 2s/4s/8s
+- 无结果自动重试 3 次（Phase 4/5/6 资源密集型引擎间隔 30s/60s/120s）
 - 对解析成功但 `naabu` 未返回端口的域名，进入 Phase 5 前会用 `httpx` 再做默认协议/默认端口兜底探测
 
 ---
@@ -167,14 +167,17 @@
 
 ### Phase 6 — Vulnerability Scanning（漏洞扫描）
 
+> **前置：6.0 规模守卫** —— 先按 24 小时阈值决定走【全量覆盖】还是【优化规则】，
+> 详见「关键机制 → 规模守卫」。**必须先输出规模评估与所采用的规则**。
+
 **6 个引擎**:
 
 | 步骤 | 引擎 | 功能 | 输出 |
 |------|------|------|------|
 | 6.1 | kscan | 端口指纹 + Hydra 弱口令爆破 | `active_ports/*_portsfinger.txt` |
 | 6.2 | afrog | POC 验证（高危+严重，分批 500/批） | `afrog_scan_results/part_*.json` |
-| 6.3 | ihoneyBakFileScan | 备份文件扫描 | `backup_result/backup_scan.txt` |
-| 6.4 | auto_dirsearch | 目录/文件爆破（1C1G 自适应） | `dirsearch_result/smart_scan_*.txt` |
+| 6.3 | ihoneyBakFileScan | 备份文件扫描 | `backup_result/backup_scan.txt` → **须过软404过滤** |
+| 6.4 | auto_dirsearch | 目录/文件爆破（1C1G 自适应） | `dirsearch_result/smart_scan_*.txt` → **须过软404过滤** |
 | 6.5 | nuclei | YAML 模板扫描 (`~/nuclei-templates/`) | `nuclei_fuzzing_result/nuclei-templates_fuzzing.txt` |
 | 6.6 | katana + nuclei DAST | 爬虫 (`-d 5`) + DAST Fuzz | `nuclei_fuzzing_result/*.txt` |
 
@@ -183,6 +186,9 @@
 - afrog: `split -l 500` 分批，每批后 `rm` 临时文件，自动归档 `json/html/err.log` 到 `afrog_scan_results/`
 - nuclei 模板: 默认使用 `~/nuclei-templates/`（非 `/root/`），DAST 模板从 `/opt/fuzzing-templates` 软链
 - dirsearch: 默认保留并重点研判 `200,401,403,301,302,307,308,405`，智能过滤无结果时回退标准模式，并补扫少量高价值敏感文件
+- **6.3.1 / 6.4.1 软404过滤（MUST，不可跳过）**: 备份与 dirsearch 的原始输出
+  必须经 `soft404_check.py` / `dirsearch_filter.py` 过滤；
+  **报告与研判只能引用 `*_clean.txt`**，禁止引用 raw（详见「关键机制 → 软404治理」）
 
 ---
 
@@ -216,26 +222,33 @@ python3 references/scripts/generate_report.py -r targets/
 
 Phase 7 研判完成后，AI 对确认有效的漏洞执行实际攻击，**不做建议而是直接利用**。
 
-**11 条利用链路（按优先级）**:
+**12 条利用链路（按 tier 升序）**:
 
 | 优先级 | 漏洞类型 | 攻击方式 | 预期成果 |
 |--------|---------|---------|---------|
 | Tier 0 | 弱口令 | SSH/MySQL/Redis/PG/Mongo/FTP 直接登录 | Shell / 数据库访问 |
 | Tier 1 | RCE/命令注入 | 反弹 shell / webshell 部署 | 服务器控制权 |
-| Tier 2 | SQL 注入 | sqlmap --dbs → --dump → 凭据提取 | 数据库数据 / OS shell |
+| Tier 2 | SQL 注入 | sqlmap `--dbs` → `--dump` → 凭据提取 | 数据库数据（**禁止 `--os-shell`**） |
 | Tier 2 | 备份/配置泄露 | 下载 → 解压 → grep 凭据 | 源码 / 数据库密码 |
-| Tier 3 | 默认凭据 | 20 对常用弱口令尝试面板登录 | 后台管理权限 |
+| Tier 3 | 默认凭据 | 15 条常用弱口令尝试面板登录（上限 20 对） | 后台管理权限 |
 | Tier 3 | 登录口爆破 | Basic Auth / ffuf 表单爆破 | 后台认证绕过 |
 | Tier 3 | 文件上传 | PHP/JSP webshell 上传+验证 | 代码执行 |
 | Tier 4 | LFI/路径穿越 | /etc/passwd → .env → 凭据链 | 配置信息 → RCE |
 | Tier 4 | SSTI | Jinja2/Twig/Freemarker RCE payload | 命令执行 |
-| Tier 4 | SSRF | AWS 元数据 + 内网端口探测 | 云凭据 / 内网拓扑 |
+| Tier 4 | SSRF | 云元数据 + 内网端口探测 | 云凭据 / 内网拓扑 |
 | Tier 4 | OAuth 滥用 | redirect_uri 绕过 / state 缺失 / scope 越权 | 账号接管 |
 | Tier 5 | 注册接口利用 | 自动注册 → 登录 → 管理功能越权测试 | 越权访问 |
 
+> ⚠️ **注册接口利用是 Tier 5 最低优先级**，排在 LFI/SSTI/SSRF/OAuth **之后**
+> （注册流程通常有验证码/邮箱验证，投入产出比低）。
+
 **凭据复用喷洒**: 所有收割的 user:pass 对所有 SSH 端口尝试。
 
-**产物**: `targets/$DOMAIN/exploit_result/` — exploit_log / exploit_success / harvested_credentials / evidence /
+**产物**: `targets/$DOMAIN/exploit_result/` — `exploit_plan.json`（Phase 8 入口）、
+`exploit_log.txt`、`exploit_success.txt`、`harvested_credentials.txt`、`test_accounts.txt`、
+`login_candidates.txt`、`register_candidates.txt`、`oauth_candidates.txt`、`all_targets.txt`、
+`ssh_targets.txt`、`sqli_request.txt`、`admin_paths_to_test.txt`、`sqlmap/`、`evidence/`、
+`<domain>_exploit_report.md`
 
 ---
 
@@ -278,6 +291,72 @@ admin.target.com:443    → 域名正则 → active_webs_ports.txt (走 kscan --
 |------|------|------|
 | 子域名工具 | > 20000 条 | 目标可能是泛解析或 CDN，结果无意义 |
 | dnsgen/alterx | > 1000 条 | 排列爆炸，几乎全是垃圾 |
+
+### 规模守卫（24 小时阈值）
+
+重型引擎启动前必须用**实测吞吐**估算耗时，按 24 小时阈值二选一：
+
+| 预计耗时 | 规则 | 目的 |
+|---------|------|------|
+| **≤ 24 小时** | **全量覆盖扫描** | 代价可接受 → 保证覆盖完整、不留盲区 |
+| **> 24 小时** | **优化规则扫描**（Tier A/B/C 分级） | 实际不可完成 → 优先保证能出结果 |
+
+**吞吐必须实测，不得凭经验估算** —— 实测发现同样 1496 个 POC，
+混 403/302 的 500 目标集只有 **4.3 task/s**，纯 200 的 15 目标集达 **35 task/s**（8 倍差距）。
+
+用户可双向覆盖：明确要求"不管多久都全量" ⇒ 全量；"启用分级" ⇒ 立即分级。
+
+### 软 404 / SPA catch-all 误报治理
+
+SPA 站点对**任意路径**都返回 `index.html` + 200，而扫描器把"非空 200"当命中，
+会产生大量高危误报。**实测某次扫描 28 条"高危"全部是此类误报**，
+其中 dirsearch 报出的 11 条 `.env` 体积从 882B 到 108539B 各不相同，
+**极像真实配置泄露**，实为各站 index.html。
+
+治理方式：对每个命中 host 取**随机不存在路径**做基线复测。
+
+| 产物 | 含义 | 报告 |
+|------|------|------|
+| `*_clean.txt` | 真实命中 | ✅ 引用 |
+| `*_soft404.txt` | 软 404 误报 | ❌ 禁止引用 |
+| `*_unverified.txt` | 无法判定 | ⚠️ 人工确认 |
+
+三条实现要点：**基线与命中项都要重试 3 次**；**基线一致单条即定案**；
+**取不到基线 ⇒ unverified，绝不允许默认判 clean**。
+
+### 长任务执行模型
+
+AI Agent harness（Claude Code / Codex）的 bash 工具**每次调用是独立 shell**，
+单次有硬性超时上限（通常 10 分钟）。因此**禁止**用阻塞式轮询跑长扫描——
+超过 10 分钟的扫描会被 harness 强杀且成果丢失。
+
+统一使用 `references/scripts/watchdog_lib.sh`：
+
+| 函数 | 语义 |
+|------|------|
+| `wd_run` | **阻塞**，返回时任务已结束（后续步骤依赖产物时用） |
+| `wd_start` | **非阻塞**，立即返回（边跑边做别的事时用） |
+| `wd_poll` | 查状态，返回 **0=运行中 / 1=已结束**（返回值**不是**退出码） |
+| `wd_exitcode` | 取已完成任务的退出码 |
+| `wd_wait` / `wd_kill` | 受限等待 / TERM→15s→KILL |
+
+**进度判定 = 输出字节增长 OR CPU 增长率 ≥ 20%**：
+- 只看字节数会**误杀**缓冲输出的健康进程（实测 0 字节跑 40 分钟被误杀）
+- 只看 CPU 增长会**漏杀**被目标 RST 拖住的僵尸进程（实测 0.04% CPU 缓慢增长）
+
+### 跨调用变量恢复
+
+同样是"每次调用独立 shell"的后果：`DOMAIN` / `SCRIPT_DIR` / `TARGET_DIR` 等变量
+**不会跨调用保留**，而全流程 40+ 处依赖它们。
+
+因此 Phase 1 会生成 `targets/<domain>/runtime/env.sh`（含全部变量 + 自动 source
+`watchdog_lib.sh`），**之后每次 bash 调用的第一行必须 source 它**：
+
+```bash
+source targets/<domain>/runtime/env.sh
+```
+
+未生成或未 source 就直接跑后续步骤 = 违规，会得到空路径或 `unbound variable`。
 
 ---
 
@@ -324,16 +403,25 @@ targets/<domain>/
 │   ├── active_websfinger.json
 │   ├── active_webs.txt
 │   ├── high_value_targets.txt
-│   └── leak_risks.txt
+│   ├── leak_risks.txt
+│   ├── tier_a_highvalue.txt    # 仅启用分级扫描时生成
+│   ├── tier_b_200.txt          # 仅启用分级扫描时生成
+│   └── tier_c_other.txt        # 仅启用分级扫描时生成
 ├── afrog_scan_results/
 │   ├── part_*.json
 │   └── *.html
 ├── backup_result/
-│   └── backup_scan.txt
+│   ├── backup_scan.txt              # 引擎原始输出（含软404误报，禁止写报告）
+│   ├── backup_scan_clean.txt        # ✅ 过滤后真实命中（报告只引用这个）
+│   ├── backup_scan_soft404.txt      # ❌ 软404误报
+│   └── backup_scan_unverified.txt   # ⚠️ 无法判定，需人工确认
 ├── brute_result/
 │   └── brute_success.txt
 ├── dirsearch_result/
-│   └── smart_scan_*.txt
+│   ├── smart_scan_*.txt             # 引擎原始输出（含软404误报，禁止写报告）
+│   ├── dirsearch_clean.txt          # ✅ 过滤后真实命中（报告只引用这个）
+│   ├── dirsearch_soft404.txt        # ❌ 软404误报
+│   └── dirsearch_unverified.txt     # ⚠️ 无法判定，需人工确认
 ├── nuclei_fuzzing_result/
 │   ├── nuclei-templates_fuzzing.txt
 │   ├── nuclei-DAST_fuzzing.txt
@@ -347,6 +435,11 @@ targets/<domain>/
 │   ├── exploit_success.txt
 │   ├── harvested_credentials.txt
 │   └── evidence/
+├── runtime/
+│   ├── env.sh               # 跨调用变量恢复（每次 bash 调用先 source 它）
+│   ├── <tool>.pid           # 长任务 PID
+│   ├── <tool>.exitcode      # 长任务退出码
+│   └── <tool>.status        # running / done / idle-timeout / killed
 └── <domain>_7scanAI_report.html
 ```
 
@@ -497,7 +590,10 @@ git clone https://github.com/<your-username>/7scanAI.git /opt/code/7scanAI
     └── scripts/
         ├── auto_install.sh        # 环境预检 + 缺失自动安装
         ├── auto_dirsearch.py      # 智能目录爆破（1C1G 自适应）
-        └── generate_report.py     # 生成离线 HTML 报告
+        ├── generate_report.py     # 生成离线 HTML 报告
+        ├── watchdog_lib.sh        # 脱离式长任务执行库（双超时 + CPU/字节双进度信号）
+        ├── soft404_check.py       # 备份扫描软404校验（三分类输出）
+        └── dirsearch_filter.py    # dirsearch 软404过滤（三分类输出）
 ```
 
 ## 版本
@@ -505,7 +601,7 @@ git clone https://github.com/<your-username>/7scanAI.git /opt/code/7scanAI
 **v2.0** — 2026-08-12
 - 8 Phase 完整工作流
 - 3 项 Phase 1 确认（端口 / 域名变形 / 截图）
-- 15 个安全工具集成（7 子域名 + 3 排列/DNS + 6 漏洞引擎）
+- 16 个安全工具集成（7 子域名 + 3 排列/DNS + 6 漏洞引擎）
 - DOMAIN 路径穿越校验
 - pipefail 强制启用
 - grep -F 精确匹配 / jq null 过滤 / IP 格式校验
